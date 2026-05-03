@@ -639,3 +639,83 @@ fn extern_field_path_on_message_is_build_error() {
         "error must explain the rejection: {msg}"
     );
 }
+
+#[test]
+fn extern_field_path_preserves_wire_format_shape() {
+    let mut file = proto3_file("ext_invariance.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("path".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_STRING),
+            proto3_optional: Some(true),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("_path".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let baseline = generate(
+        &[file.clone()],
+        &["ext_invariance.proto".to_string()],
+        &CodeGenConfig {
+            generate_views: false,
+            ..CodeGenConfig::default()
+        },
+    )
+    .expect("baseline should generate");
+    let baseline_content = joined(&baseline);
+
+    let swapped = generate(
+        &[file],
+        &["ext_invariance.proto".to_string()],
+        &extern_path_config(vec![ExternFieldPath::new(
+            ".Msg.path",
+            "crate::wrap::Foo",
+        )]),
+    )
+    .expect("swapped should generate");
+    let swapped_content = joined(&swapped);
+
+    // Substrings that MUST appear in BOTH outputs — the underlying wire-format
+    // calls are unchanged. `decode_string` is excluded because the baseline's
+    // explicit-presence path uses `merge_string` (in-place); only the swapped
+    // path uses `decode_string + From`.
+    for invariant in [
+        "::buffa::types::encode_string",
+        "::buffa::types::string_encoded_len",
+        "::buffa::encoding::WireType::LengthDelimited",
+    ] {
+        assert!(
+            baseline_content.contains(invariant),
+            "baseline missing wire-format invariant `{invariant}`: {baseline_content}"
+        );
+        assert!(
+            swapped_content.contains(invariant),
+            "swap broke wire-format invariant `{invariant}`: {swapped_content}"
+        );
+    }
+
+    // Substrings that MUST appear ONLY in the swapped output — the
+    // explicit-trait wrap is the only divergence. Use contains_normalized
+    // because prettyplease may line-wrap these long type expressions.
+    for swap_marker in [
+        "<crate::wrap::Foo as ::core::convert::From<",
+        "<crate::wrap::Foo as ::core::convert::AsRef<",
+    ] {
+        assert!(
+            !contains_normalized(&baseline_content, swap_marker),
+            "baseline must not contain swap marker `{swap_marker}`"
+        );
+        assert!(
+            contains_normalized(&swapped_content, swap_marker),
+            "swapped output must contain swap marker `{swap_marker}`: {swapped_content}"
+        );
+    }
+}
