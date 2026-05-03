@@ -1114,12 +1114,7 @@ fn classify_field(
         match extern_field {
             Some(entry) => syn::parse_str::<syn::Type>(&entry.owned_path)
                 .map(|ty| quote! { #ty })
-                .map_err(|e| {
-                    CodeGenError::Other(format!(
-                        "invalid extern owned_path '{}' for field '{}': {}",
-                        entry.owned_path, field_fqn, e
-                    ))
-                }),
+                .map_err(|_| CodeGenError::InvalidTypePath(entry.owned_path.clone())),
             None => Ok(scalar),
         }
     };
