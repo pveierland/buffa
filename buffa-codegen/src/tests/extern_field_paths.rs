@@ -377,3 +377,135 @@ fn bytes_fields_takes_precedence_over_extern_path_repeated() {
         "extern path must lose to bytes_fields for repeated bytes too: {content}"
     );
 }
+
+#[test]
+fn view_string_field_uses_view_extern_path() {
+    let mut file = proto3_file("ext_view.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field(
+            "path",
+            1,
+            Label::LABEL_OPTIONAL,
+            Type::TYPE_STRING,
+        )],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![
+            ExternFieldPath::new(".Msg.path", "crate::wrap::Foo")
+                .with_view_path("crate::wrap::FooRef"),
+        ],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_view.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    // View struct field should use FooRef, not &'a str.
+    assert!(
+        content.contains("pub path: crate::wrap::FooRef"),
+        "view field should use the view extern path: {content}"
+    );
+}
+
+#[test]
+fn view_string_field_without_view_path_uses_scalar() {
+    let mut file = proto3_file("ext_view_noview.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field(
+            "path",
+            1,
+            Label::LABEL_OPTIONAL,
+            Type::TYPE_STRING,
+        )],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![ExternFieldPath::new(
+            ".Msg.path",
+            "crate::wrap::Foo",
+        )],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_view_noview.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        content.contains("pub path: &'a str"),
+        "view field should fall back to &'a str when no view path: {content}"
+    );
+}
+
+#[test]
+fn view_extern_path_ignored_when_views_disabled() {
+    let mut file = proto3_file("ext_view_off.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field(
+            "path",
+            1,
+            Label::LABEL_OPTIONAL,
+            Type::TYPE_STRING,
+        )],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: false,
+        extern_field_paths: vec![
+            ExternFieldPath::new(".Msg.path", "crate::wrap::Foo")
+                .with_view_path("crate::wrap::FooRef"),
+        ],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_view_off.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        !content.contains("FooRef"),
+        "no view code should reference the view path: {content}"
+    );
+}
+
+#[test]
+fn view_string_decode_wraps_borrow_str_with_explicit_from() {
+    let mut file = proto3_file("ext_view_decode.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field(
+            "path",
+            1,
+            Label::LABEL_OPTIONAL,
+            Type::TYPE_STRING,
+        )],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![
+            ExternFieldPath::new(".Msg.path", "crate::wrap::Foo")
+                .with_view_path("crate::wrap::FooRef"),
+        ],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_view_decode.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        contains_normalized(
+            &content,
+            "<crate::wrap::FooRef as ::core::convert::From<&str>>::from"
+        ),
+        "view decode site must use explicit-trait From form for the view extern: {content}"
+    );
+}

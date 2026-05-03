@@ -409,15 +409,36 @@ fn view_singular_type(
 ) -> Result<TokenStream, CodeGenError> {
     let MessageScope {
         ctx,
+        proto_fqn,
         features: parent_features,
         ..
     } = scope;
     let features = &crate::features::resolve_field(ctx, field, parent_features);
     let ty = effective_type(ctx, field, features);
 
+    // View-side extern path lookup: only meaningful when views are enabled.
+    let field_name = field.name.as_deref().unwrap_or("");
+    let field_fqn = format!(".{}.{}", proto_fqn, field_name);
+    let extern_view = ctx
+        .config
+        .generate_views
+        .then(|| {
+            ctx.lookup_extern_field_path(&field_fqn)
+                .and_then(|e| e.view_path.as_deref())
+        })
+        .flatten();
+
     if is_explicit_presence_scalar(field, ty, features) {
         return Ok(match ty {
-            Type::TYPE_STRING => quote! { ::core::option::Option<&'a str> },
+            Type::TYPE_STRING => {
+                if let Some(path) = extern_view {
+                    let view_ty: syn::Type = syn::parse_str(path)
+                        .map_err(|_| CodeGenError::InvalidTypePath(path.to_string()))?;
+                    quote! { ::core::option::Option<#view_ty> }
+                } else {
+                    quote! { ::core::option::Option<&'a str> }
+                }
+            }
             Type::TYPE_BYTES => quote! { ::core::option::Option<&'a [u8]> },
             Type::TYPE_ENUM => {
                 let et = resolve_enum_ty(scope, field)?;
@@ -435,7 +456,15 @@ fn view_singular_type(
     }
 
     match ty {
-        Type::TYPE_STRING => Ok(quote! { &'a str }),
+        Type::TYPE_STRING => {
+            if let Some(path) = extern_view {
+                let view_ty: syn::Type = syn::parse_str(path)
+                    .map_err(|_| CodeGenError::InvalidTypePath(path.to_string()))?;
+                Ok(quote! { #view_ty })
+            } else {
+                Ok(quote! { &'a str })
+            }
+        }
         Type::TYPE_BYTES => Ok(quote! { &'a [u8] }),
         Type::TYPE_MESSAGE | Type::TYPE_GROUP => {
             let view_ty = resolve_view_ty_tokens(scope, field)?;
@@ -459,13 +488,32 @@ fn view_repeated_type(
 ) -> Result<TokenStream, CodeGenError> {
     let MessageScope {
         ctx,
+        proto_fqn,
         features: parent_features,
         ..
     } = scope;
     let features = &crate::features::resolve_field(ctx, field, parent_features);
     let ty = effective_type(ctx, field, features);
+    let field_name = field.name.as_deref().unwrap_or("");
+    let field_fqn = format!(".{}.{}", proto_fqn, field_name);
+    let extern_view = ctx
+        .config
+        .generate_views
+        .then(|| {
+            ctx.lookup_extern_field_path(&field_fqn)
+                .and_then(|e| e.view_path.as_deref())
+        })
+        .flatten();
     match ty {
-        Type::TYPE_STRING => Ok(quote! { ::buffa::RepeatedView<'a, &'a str> }),
+        Type::TYPE_STRING => {
+            if let Some(path) = extern_view {
+                let view_ty: syn::Type = syn::parse_str(path)
+                    .map_err(|_| CodeGenError::InvalidTypePath(path.to_string()))?;
+                Ok(quote! { ::buffa::RepeatedView<'a, #view_ty> })
+            } else {
+                Ok(quote! { ::buffa::RepeatedView<'a, &'a str> })
+            }
+        }
         Type::TYPE_BYTES => Ok(quote! { ::buffa::RepeatedView<'a, &'a [u8]> }),
         Type::TYPE_MESSAGE | Type::TYPE_GROUP => {
             let view_ty = resolve_view_ty_tokens(scope, field)?;
@@ -796,6 +844,7 @@ fn scalar_decode_arm(
 ) -> Result<TokenStream, CodeGenError> {
     let MessageScope {
         ctx,
+        proto_fqn,
         features: parent_features,
         ..
     } = scope;
@@ -805,6 +854,7 @@ fn scalar_decode_arm(
         .name
         .as_deref()
         .ok_or(CodeGenError::MissingField("field.name"))?;
+    let field_fqn = format!(".{}.{}", proto_fqn, field_name);
     let field_number = validated_field_number(field)?;
     let ty = effective_type(ctx, field, features);
     let ident = make_field_ident(field_name);
@@ -816,7 +866,12 @@ fn scalar_decode_arm(
     if is_explicit_presence_scalar(field, ty, features) {
         let assign = match ty {
             Type::TYPE_STRING => {
-                quote! { view.#ident = Some(::buffa::types::borrow_str(&mut cur)?); }
+                let decoded = ctx.wrap_extern_view_decode(
+                    &field_fqn,
+                    &quote! { &str },
+                    quote! { ::buffa::types::borrow_str(&mut cur)? },
+                )?;
+                quote! { view.#ident = Some(#decoded); }
             }
             Type::TYPE_BYTES => {
                 quote! { view.#ident = Some(::buffa::types::borrow_bytes(&mut cur)?); }
@@ -844,7 +899,14 @@ fn scalar_decode_arm(
     }
 
     let assign = match ty {
-        Type::TYPE_STRING => quote! { view.#ident = ::buffa::types::borrow_str(&mut cur)?; },
+        Type::TYPE_STRING => {
+            let decoded = ctx.wrap_extern_view_decode(
+                &field_fqn,
+                &quote! { &str },
+                quote! { ::buffa::types::borrow_str(&mut cur)? },
+            )?;
+            quote! { view.#ident = #decoded; }
+        }
         Type::TYPE_BYTES => quote! { view.#ident = ::buffa::types::borrow_bytes(&mut cur)?; },
         Type::TYPE_ENUM => {
             if is_closed_enum(features) {
@@ -905,6 +967,7 @@ fn repeated_decode_arm(
 ) -> Result<TokenStream, CodeGenError> {
     let MessageScope {
         ctx,
+        proto_fqn,
         features: parent_features,
         ..
     } = scope;
@@ -914,6 +977,7 @@ fn repeated_decode_arm(
         .name
         .as_deref()
         .ok_or(CodeGenError::MissingField("field.name"))?;
+    let field_fqn = format!(".{}.{}", proto_fqn, field_name);
     let field_number = validated_field_number(field)?;
     let ty = effective_type(ctx, field, features);
     let ident = make_field_ident(field_name);
@@ -966,7 +1030,11 @@ fn repeated_decode_arm(
             2u8,
         );
         let borrow = match ty {
-            Type::TYPE_STRING => quote! { ::buffa::types::borrow_str(&mut cur)? },
+            Type::TYPE_STRING => ctx.wrap_extern_view_decode(
+                &field_fqn,
+                &quote! { &str },
+                quote! { ::buffa::types::borrow_str(&mut cur)? },
+            )?,
             Type::TYPE_BYTES => quote! { ::buffa::types::borrow_bytes(&mut cur)? },
             _ => unreachable!(),
         };
@@ -1147,7 +1215,12 @@ fn oneof_decode_arms(
     fields: &[&FieldDescriptorProto],
     view_oneof_prefix: &TokenStream,
 ) -> Result<Vec<TokenStream>, CodeGenError> {
-    let MessageScope { ctx, features, .. } = scope;
+    let MessageScope {
+        ctx,
+        proto_fqn,
+        features,
+        ..
+    } = scope;
     let preserve_unknown_fields = ctx.config.preserve_unknown_fields;
     let field_ident = make_field_ident(oneof_name);
     let view_enum: TokenStream = quote! { #view_oneof_prefix #base_ident };
@@ -1159,6 +1232,7 @@ fn oneof_decode_arms(
                 .name
                 .as_deref()
                 .ok_or(CodeGenError::MissingField("field.name"))?;
+            let field_fqn = format!(".{}.{}", proto_fqn, name);
             let field_number = validated_field_number(field)?;
             let ty = effective_type(ctx, field, features);
             let field_features = crate::features::resolve_field(ctx, field, features);
@@ -1168,7 +1242,11 @@ fn oneof_decode_arms(
             let wire_check = wire_type_check(field_number, &wire_type, expected_byte);
 
             let value = match ty {
-                Type::TYPE_STRING => quote! { ::buffa::types::borrow_str(&mut cur)? },
+                Type::TYPE_STRING => ctx.wrap_extern_view_decode(
+                    &field_fqn,
+                    &quote! { &str },
+                    quote! { ::buffa::types::borrow_str(&mut cur)? },
+                )?,
                 Type::TYPE_BYTES => quote! { ::buffa::types::borrow_bytes(&mut cur)? },
                 Type::TYPE_MESSAGE => {
                     let vt = resolve_view_decode_tokens(scope, field)?;

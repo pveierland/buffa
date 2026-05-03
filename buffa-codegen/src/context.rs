@@ -595,6 +595,38 @@ impl<'a> CodeGenContext<'a> {
             *<#owned_ty as ::core::convert::AsRef<#inner_ty>>::as_ref(#field_ref_expr)
         })
     }
+
+    /// Wrap a view-decoded `&str` (or `&[u8]`) expression for a field whose
+    /// view-side type was swapped via `extern_field_paths` with a `view_path`.
+    /// Returns the original expression untouched when no view swap applies.
+    ///
+    /// Emits the explicit-trait form
+    /// `<View as ::core::convert::From<Inner>>::from(decoded_expr)` so the
+    /// call site compiles even if the extern view type later grows additional
+    /// `From` impls that would otherwise cause inference ambiguity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::CodeGenError::InvalidTypePath`] when the matched
+    /// entry's `view_path` fails to parse as a Rust type.
+    pub fn wrap_extern_view_decode(
+        &self,
+        field_fqn: &str,
+        borrowed_inner_ty: &proc_macro2::TokenStream,
+        decoded_expr: proc_macro2::TokenStream,
+    ) -> Result<proc_macro2::TokenStream, crate::CodeGenError> {
+        let Some(entry) = self.lookup_extern_field_path(field_fqn) else {
+            return Ok(decoded_expr);
+        };
+        let Some(view_path) = entry.view_path.as_deref() else {
+            return Ok(decoded_expr);
+        };
+        let view_ty: syn::Type = syn::parse_str(view_path)
+            .map_err(|_| crate::CodeGenError::InvalidTypePath(view_path.to_string()))?;
+        Ok(quote::quote! {
+            <#view_ty as ::core::convert::From<#borrowed_inner_ty>>::from(#decoded_expr)
+        })
+    }
 }
 
 /// Scope-local context for code generation within a message.
