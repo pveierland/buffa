@@ -154,11 +154,11 @@ pub(crate) fn generate_text_impl(
 
     let scalar_encode: Vec<_> = scalar_fields
         .iter()
-        .map(|f| scalar_encode_stmt(ctx, f, features))
+        .map(|f| scalar_encode_stmt(ctx, f, proto_fqn, features))
         .collect::<Result<_, _>>()?;
     let repeated_encode: Vec<_> = repeated_fields
         .iter()
-        .map(|f| repeated_encode_stmt(ctx, f, features))
+        .map(|f| repeated_encode_stmt(ctx, f, proto_fqn, features))
         .collect::<Result<_, _>>()?;
     let oneof_encode: Vec<_> = oneof_groups
         .iter()
@@ -350,6 +350,51 @@ fn is_copy_scalar(ty: Type) -> bool {
     )
 }
 
+/// The bare scalar Rust path used as `Inner` in `<Owned as From<Inner>>` /
+/// `<Owned as AsRef<Inner>>` disambiguation for `extern_field_paths` wraps.
+///
+/// Mirrors `crate::message::scalar_rust_type` but without an `ImportResolver`
+/// dependency — text-format emit doesn't carry a resolver and only ever needs
+/// these scalar shapes (extern paths are validated to TYPE_STRING + numerics
+/// at `generate` entry).
+fn extern_inner_ty(ty: Type) -> TokenStream {
+    match ty {
+        Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => quote! { i32 },
+        Type::TYPE_INT64 | Type::TYPE_SINT64 | Type::TYPE_SFIXED64 => quote! { i64 },
+        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => quote! { u32 },
+        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => quote! { u64 },
+        Type::TYPE_FLOAT => quote! { f32 },
+        Type::TYPE_DOUBLE => quote! { f64 },
+        Type::TYPE_STRING => quote! { ::buffa::alloc::string::String },
+        _ => unreachable!("extern_inner_ty called for non-extern-eligible type {:?}", ty),
+    }
+}
+
+/// True for the numeric scalar types that an `extern_field_paths` entry can
+/// validly target — every fixed/varint integer plus float/double. Mirrors the
+/// allow-list in `crate::validate_extern_field_paths`: excludes `TYPE_BOOL`
+/// (rejected at `generate` entry), strings, bytes, enums, messages, and
+/// groups. Enumerated explicitly rather than computed from `is_copy_scalar`
+/// so that `extern_inner_ty(ty)` is never reachable for a non-numeric `ty`
+/// even if a future call site forgets to pre-filter enums.
+fn is_extern_eligible_numeric(ty: Type) -> bool {
+    matches!(
+        ty,
+        Type::TYPE_INT32
+            | Type::TYPE_SINT32
+            | Type::TYPE_SFIXED32
+            | Type::TYPE_INT64
+            | Type::TYPE_SINT64
+            | Type::TYPE_SFIXED64
+            | Type::TYPE_UINT32
+            | Type::TYPE_FIXED32
+            | Type::TYPE_UINT64
+            | Type::TYPE_FIXED64
+            | Type::TYPE_FLOAT
+            | Type::TYPE_DOUBLE
+    )
+}
+
 /// Text-format encode name and decode match pattern for a field.
 ///
 /// Proto2 `group Data = N { ... }` creates a field named `data` (protoc
@@ -457,6 +502,7 @@ fn enum_read(closed: bool, enum_ty: &TokenStream, dec: &proc_macro2::Ident) -> T
 fn scalar_encode_stmt(
     ctx: &CodeGenContext,
     field: &FieldDescriptorProto,
+    proto_fqn: &str,
     parent_features: &ResolvedFeatures,
 ) -> Result<TokenStream, CodeGenError> {
     let features = &crate::features::resolve_field(ctx, field, parent_features);
@@ -468,6 +514,8 @@ fn scalar_encode_stmt(
     let ty = effective_type(ctx, field, features);
     let (name_lit, _) = text_field_name(proto_name, field, ty);
     let required = is_required_field(field, features);
+    let field_fqn = format!(".{proto_fqn}.{proto_name}");
+    let extern_match = ctx.lookup_extern_field_path(&field_fqn).is_some();
 
     // Explicit-presence (Option<T>): emit when Some, regardless of value.
     if is_explicit_presence_scalar(field, ty, features) {
@@ -475,6 +523,22 @@ fn scalar_encode_stmt(
             Type::TYPE_ENUM => {
                 let closed = is_closed_enum(features);
                 enum_write(closed, &quote! { __v })
+            }
+            Type::TYPE_STRING if extern_match => {
+                let inner = extern_inner_ty(ty);
+                let operand =
+                    ctx.wrap_extern_encode_ref(&field_fqn, &inner, quote! { __v })?;
+                write_call(ty, &operand)
+            }
+            _ if extern_match && is_extern_eligible_numeric(ty) => {
+                let inner = extern_inner_ty(ty);
+                let operand = ctx.wrap_extern_encode_value(
+                    &field_fqn,
+                    &inner,
+                    quote! { *__v },
+                    quote! { __v },
+                )?;
+                write_call(ty, &operand)
             }
             _ if is_copy_scalar(ty) => write_call(ty, &quote! { *__v }),
             _ => write_call(ty, &quote! { __v }),
@@ -525,9 +589,23 @@ fn scalar_encode_stmt(
 
     // String / bytes: skip when empty (implicit presence). Both `String`
     // and `Vec<u8>` / `bytes::Bytes` expose `.is_empty()` and deref to
-    // `&str` / `&[u8]`.
+    // `&str` / `&[u8]`. Extern wrappers route through `AsRef<Inner>` so
+    // the resulting `&Inner` provides the same methods.
     if matches!(ty, Type::TYPE_STRING | Type::TYPE_BYTES) {
-        let write = write_call(ty, &quote! { &self.#ident });
+        let write_operand = if ty == Type::TYPE_STRING && extern_match {
+            let inner = extern_inner_ty(ty);
+            ctx.wrap_extern_encode_ref(&field_fqn, &inner, quote! { &self.#ident })?
+        } else {
+            quote! { &self.#ident }
+        };
+        let write = write_call(ty, &write_operand);
+        let is_empty_check = if ty == Type::TYPE_STRING && extern_match {
+            // The wrapped operand is `<Owned as AsRef<String>>::as_ref(&self.#ident)`,
+            // already evaluating to `&String`; parens let `.is_empty()` bind.
+            quote! { (#write_operand).is_empty() }
+        } else {
+            quote! { self.#ident.is_empty() }
+        };
         return Ok(if required {
             quote! {
                 enc.write_field_name(#name_lit)?;
@@ -535,7 +613,7 @@ fn scalar_encode_stmt(
             }
         } else {
             quote! {
-                if !self.#ident.is_empty() {
+                if !#is_empty_check {
                     enc.write_field_name(#name_lit)?;
                     #write
                 }
@@ -544,14 +622,25 @@ fn scalar_encode_stmt(
     }
 
     // Numeric scalar (implicit presence): skip when zero.
-    let write = write_call(ty, &quote! { self.#ident });
+    let val = if extern_match {
+        let inner = extern_inner_ty(ty);
+        ctx.wrap_extern_encode_value(
+            &field_fqn,
+            &inner,
+            quote! { self.#ident },
+            quote! { &self.#ident },
+        )?
+    } else {
+        quote! { self.#ident }
+    };
+    let write = write_call(ty, &val);
     if required {
         return Ok(quote! {
             enc.write_field_name(#name_lit)?;
             #write
         });
     }
-    let check = is_non_default_expr(ty, &quote! { self.#ident });
+    let check = is_non_default_expr(ty, &val);
     Ok(quote! {
         if #check {
             enc.write_field_name(#name_lit)?;
@@ -600,10 +689,21 @@ fn scalar_merge_arm(
 
     // String: `read_string()` returns `Cow<str>`, need `.into_owned()`.
     // Bytes: `read_bytes()` returns `Vec<u8>`; `bytes::Bytes: From<Vec<u8>>`.
+    let field_fqn = format!(".{proto_fqn}.{proto_name}");
+    let extern_match = ctx.lookup_extern_field_path(&field_fqn).is_some();
     let read = match ty {
         Type::TYPE_STRING => quote! { dec.read_string()?.into_owned() },
         Type::TYPE_BYTES if use_bytes => quote! { ::buffa::bytes::Bytes::from(dec.read_bytes()?) },
         _ => read_call(ty),
+    };
+    // bool extern is rejected at validation time; everything else (string +
+    // numeric scalars) routes through the explicit-trait `From<Inner>` wrap
+    // when an entry matches.
+    let read = if extern_match && (ty == Type::TYPE_STRING || is_extern_eligible_numeric(ty)) {
+        let inner = extern_inner_ty(ty);
+        ctx.wrap_extern_decode(&field_fqn, &inner, read)?
+    } else {
+        read
     };
     Ok(if explicit {
         quote! { #name_pat => self.#ident = ::core::option::Option::Some(#read), }
@@ -619,6 +719,7 @@ fn scalar_merge_arm(
 fn repeated_encode_stmt(
     ctx: &CodeGenContext,
     field: &FieldDescriptorProto,
+    proto_fqn: &str,
     parent_features: &ResolvedFeatures,
 ) -> Result<TokenStream, CodeGenError> {
     let features = &crate::features::resolve_field(ctx, field, parent_features);
@@ -629,6 +730,8 @@ fn repeated_encode_stmt(
     let ident = make_field_ident(proto_name);
     let ty = effective_type(ctx, field, features);
     let (name_lit, _) = text_field_name(proto_name, field, ty);
+    let field_fqn = format!(".{proto_fqn}.{proto_name}");
+    let extern_match = ctx.lookup_extern_field_path(&field_fqn).is_some();
 
     let body = match ty {
         Type::TYPE_ENUM => {
@@ -636,6 +739,21 @@ fn repeated_encode_stmt(
             enum_write(closed, &quote! { __v })
         }
         Type::TYPE_MESSAGE | Type::TYPE_GROUP => write_call(ty, &quote! { __v }),
+        Type::TYPE_STRING if extern_match => {
+            let inner = extern_inner_ty(ty);
+            let operand = ctx.wrap_extern_encode_ref(&field_fqn, &inner, quote! { __v })?;
+            write_call(ty, &operand)
+        }
+        _ if extern_match && is_extern_eligible_numeric(ty) => {
+            let inner = extern_inner_ty(ty);
+            let operand = ctx.wrap_extern_encode_value(
+                &field_fqn,
+                &inner,
+                quote! { *__v },
+                quote! { __v },
+            )?;
+            write_call(ty, &operand)
+        }
         _ if is_copy_scalar(ty) => write_call(ty, &quote! { *__v }),
         _ => write_call(ty, &quote! { __v }),
     };
@@ -664,6 +782,8 @@ fn repeated_merge_arm(
     let ty = effective_type(ctx, field, features);
     let (_, name_pat) = text_field_name(proto_name, field, ty);
     let use_bytes = ty == Type::TYPE_BYTES && field_uses_bytes(ctx, proto_fqn, proto_name);
+    let field_fqn = format!(".{proto_fqn}.{proto_name}");
+    let extern_match = ctx.lookup_extern_field_path(&field_fqn).is_some();
 
     // read_repeated_into handles both `f: [a, b]` and `f: a` forms. The
     // closure takes `&mut TextDecoder` as `__d` (not `dec`, which is already
@@ -680,6 +800,12 @@ fn repeated_merge_arm(
             let closed = is_closed_enum(features);
             let enum_ty = enum_type_path(ctx, field, current_package, nesting)?;
             enum_read(closed, &enum_ty, &format_ident!("__d"))
+        }
+        Type::TYPE_STRING if extern_match => {
+            let inner = extern_inner_ty(ty);
+            let inner_expr = quote! { __d.read_string()?.into_owned() };
+            let wrapped = ctx.wrap_extern_decode(&field_fqn, &inner, inner_expr)?;
+            quote! { ::core::result::Result::Ok(#wrapped) }
         }
         Type::TYPE_STRING => {
             quote! { ::core::result::Result::Ok(__d.read_string()?.into_owned()) }
@@ -706,7 +832,17 @@ fn repeated_merge_arm(
                 Type::TYPE_BOOL => quote! { __d.read_bool() },
                 _ => unreachable!(),
             };
-            quote! { #call }
+            // bool extern is rejected at validation time; numeric brands
+            // wrap the inner value via `.map(<Owned as From<Inner>>::from)`
+            // so the closure return shape stays `Result<Owned, ParseError>`.
+            if extern_match && is_extern_eligible_numeric(ty) {
+                let inner = extern_inner_ty(ty);
+                let inner_var = quote! { __inner };
+                let wrapped = ctx.wrap_extern_decode(&field_fqn, &inner, inner_var.clone())?;
+                quote! { #call.map(|#inner_var| #wrapped) }
+            } else {
+                quote! { #call }
+            }
         }
     };
     Ok(quote! {

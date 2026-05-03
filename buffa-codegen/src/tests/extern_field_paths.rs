@@ -118,13 +118,28 @@ fn repeated_string_field_uses_extern_path() {
 fn contains_normalized(content: &str, needle: &str) -> bool {
     fn squash(s: &str) -> String {
         // Collapse whitespace, then drop the "trailing comma before `>`" that
-        // prettyplease adds when it line-wraps `Trait<Arg,>` across two lines.
+        // prettyplease adds when it line-wraps `Trait<Arg,>` across multiple
+        // lines. The replacement is iterated because nested generics produce
+        // `Trait<Inner<Arg,>,>` shapes that need both commas dropped.
         let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
-        one_line
-            .replace(", >", ">")
-            .replace(", <", "<")
-            .replace(" >", ">")
-            .replace("< ", "<")
+        let mut prev = String::new();
+        let mut cur = one_line;
+        while prev != cur {
+            prev = cur.clone();
+            cur = cur
+                .replace(", >", ">")
+                .replace(",>", ">")
+                .replace(", )", ")")
+                .replace(",)", ")")
+                .replace(", ]", "]")
+                .replace(",]", "]")
+                .replace(", <", "<")
+                .replace(" >", ">")
+                .replace(" )", ")")
+                .replace("( ", "(")
+                .replace("< ", "<");
+        }
+        cur
     }
     squash(content).contains(&squash(needle))
 }
@@ -718,4 +733,94 @@ fn extern_field_path_preserves_wire_format_shape() {
             "swapped output must contain swap marker `{swap_marker}`: {swapped_content}"
         );
     }
+}
+
+/// Text-format encode for an implicit-presence extern numeric must route the
+/// `is_non_default` check and the `enc.write_*` operand through the wrap.
+/// Without this the generated `self.idx != 0u32` would not compile against a
+/// wrapper that doesn't impl `PartialEq<u32>`.
+#[test]
+fn text_format_implicit_presence_numeric_extern_wraps_value() {
+    let mut file = proto3_file("ext_text_numeric.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field(
+            "idx",
+            1,
+            Label::LABEL_OPTIONAL,
+            Type::TYPE_UINT32,
+        )],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: false,
+        generate_text: true,
+        extern_field_paths: vec![ExternFieldPath::new(".Msg.idx", "crate::wrap::Idx")],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_text_numeric.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    // Both the encode operand and the != 0 guard must use the AsRef-deref form.
+    assert!(
+        contains_normalized(
+            &content,
+            "enc.write_u32(*<crate::wrap::Idx as ::core::convert::AsRef<u32>>::as_ref(&self.idx))"
+        ),
+        "text encode must wrap numeric extern operand: {content}"
+    );
+    assert!(
+        contains_normalized(
+            &content,
+            "*<crate::wrap::Idx as ::core::convert::AsRef<u32>>::as_ref(&self.idx) != 0u32"
+        ),
+        "text non-default check must wrap numeric extern operand: {content}"
+    );
+}
+
+/// Text-format encode/decode for an extern string field must route through the
+/// explicit-trait wrap helpers — `is_empty()` and `enc.write_string` on the
+/// AsRef result, and `From<String>` on decode.
+#[test]
+fn text_format_string_extern_wraps_encode_and_decode() {
+    let mut file = proto3_file("ext_text_string.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field(
+            "path",
+            1,
+            Label::LABEL_OPTIONAL,
+            Type::TYPE_STRING,
+        )],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: false,
+        generate_text: true,
+        extern_field_paths: vec![ExternFieldPath::new(".Msg.path", "crate::wrap::Foo")],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_text_string.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        contains_normalized(
+            &content,
+            "enc.write_string(<crate::wrap::Foo as ::core::convert::AsRef<\
+             ::buffa::alloc::string::String>>::as_ref(&self.path))"
+        ),
+        "text encode must wrap string extern operand: {content}"
+    );
+    assert!(
+        contains_normalized(
+            &content,
+            "self.path = <crate::wrap::Foo as ::core::convert::From<\
+             ::buffa::alloc::string::String>>::from(dec.read_string()?.into_owned())"
+        ),
+        "text decode must wrap string extern with From<String>: {content}"
+    );
 }
