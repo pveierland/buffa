@@ -1482,7 +1482,7 @@ pub(crate) fn is_closed_enum(features: &ResolvedFeatures) -> bool {
     features.enum_type == crate::features::EnumType::Closed
 }
 
-fn scalar_rust_type(
+pub(crate) fn scalar_rust_type(
     t: Type,
     resolver: &crate::imports::ImportResolver,
 ) -> Result<TokenStream, CodeGenError> {

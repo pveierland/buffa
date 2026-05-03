@@ -508,6 +508,93 @@ impl<'a> CodeGenContext<'a> {
             .iter()
             .find(|entry| matches_proto_prefix(&entry.fqn_prefix, field_fqn))
     }
+
+    /// Wrap a decoded scalar `Inner`-typed expression for assignment into a
+    /// field whose Rust type was swapped via `extern_field_paths`.
+    /// Returns the original expression untouched when no swap applies.
+    ///
+    /// Emits the explicit-trait form
+    /// `<Owned as ::core::convert::From<Inner>>::from(decoded_expr)` so the
+    /// call site compiles even if the extern type later grows additional
+    /// `From` impls that would otherwise cause inference ambiguity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::CodeGenError::InvalidTypePath`] when the matched
+    /// entry's `owned_path` fails to parse as a Rust type.
+    pub fn wrap_extern_decode(
+        &self,
+        field_fqn: &str,
+        inner_ty: &proc_macro2::TokenStream,
+        decoded_expr: proc_macro2::TokenStream,
+    ) -> Result<proc_macro2::TokenStream, crate::CodeGenError> {
+        let Some(entry) = self.lookup_extern_field_path(field_fqn) else {
+            return Ok(decoded_expr);
+        };
+        let owned_ty: syn::Type = syn::parse_str(&entry.owned_path)
+            .map_err(|_| crate::CodeGenError::InvalidTypePath(entry.owned_path.clone()))?;
+        Ok(quote::quote! {
+            <#owned_ty as ::core::convert::From<#inner_ty>>::from(#decoded_expr)
+        })
+    }
+
+    /// Wrap a field reference for an encode or size call that takes `&Inner`
+    /// (string-backed scalars). Returns `&Inner` either way: when no swap
+    /// applies, returns `field_ref_expr` unchanged; otherwise emits
+    /// `<Owned as ::core::convert::AsRef<Inner>>::as_ref(field_ref_expr)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::CodeGenError::InvalidTypePath`] when the matched
+    /// entry's `owned_path` fails to parse as a Rust type.
+    pub fn wrap_extern_encode_ref(
+        &self,
+        field_fqn: &str,
+        inner_ty: &proc_macro2::TokenStream,
+        field_ref_expr: proc_macro2::TokenStream,
+    ) -> Result<proc_macro2::TokenStream, crate::CodeGenError> {
+        let Some(entry) = self.lookup_extern_field_path(field_fqn) else {
+            return Ok(field_ref_expr);
+        };
+        let owned_ty: syn::Type = syn::parse_str(&entry.owned_path)
+            .map_err(|_| crate::CodeGenError::InvalidTypePath(entry.owned_path.clone()))?;
+        Ok(quote::quote! {
+            <#owned_ty as ::core::convert::AsRef<#inner_ty>>::as_ref(#field_ref_expr)
+        })
+    }
+
+    /// Wrap a field expression for an encode call that takes `Inner` by value
+    /// (numeric scalars; `Inner: Copy`). Returns an `Inner` value.
+    ///
+    /// Two arguments because the unswapped and swapped paths need different
+    /// shapes at each call site:
+    /// - `field_value_expr` is the unswapped expression already evaluating to
+    ///   `Inner` (e.g. `v` from `Some(v) = self.#ident`, or `self.#ident` for
+    ///   implicit-presence, or `*v` from a `for v in &self.#ident` loop).
+    /// - `field_ref_expr` is the swapped expression evaluating to `&Owned`
+    ///   (e.g. `&v`, `&self.#ident`, or `v` from a `for v in &Vec<Owned>`
+    ///   loop where `v` is already `&Owned`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::CodeGenError::InvalidTypePath`] when the matched
+    /// entry's `owned_path` fails to parse as a Rust type.
+    pub fn wrap_extern_encode_value(
+        &self,
+        field_fqn: &str,
+        inner_ty: &proc_macro2::TokenStream,
+        field_value_expr: proc_macro2::TokenStream,
+        field_ref_expr: proc_macro2::TokenStream,
+    ) -> Result<proc_macro2::TokenStream, crate::CodeGenError> {
+        let Some(entry) = self.lookup_extern_field_path(field_fqn) else {
+            return Ok(field_value_expr);
+        };
+        let owned_ty: syn::Type = syn::parse_str(&entry.owned_path)
+            .map_err(|_| crate::CodeGenError::InvalidTypePath(entry.owned_path.clone()))?;
+        Ok(quote::quote! {
+            *<#owned_ty as ::core::convert::AsRef<#inner_ty>>::as_ref(#field_ref_expr)
+        })
+    }
 }
 
 /// Scope-local context for code generation within a message.

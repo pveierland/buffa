@@ -357,8 +357,8 @@ pub fn generate_message_impl(
     for kind in &fields {
         match kind {
             FieldKind::Scalar(f) => {
-                compute_stmts.push(scalar_compute_size_stmt(ctx, f, features)?);
-                write_stmts.push(scalar_write_to_stmt(ctx, f, features)?);
+                compute_stmts.push(scalar_compute_size_stmt(ctx, f, Some(proto_fqn), features)?);
+                write_stmts.push(scalar_write_to_stmt(ctx, f, Some(proto_fqn), features)?);
                 merge_arms.push(scalar_merge_arm(
                     ctx,
                     f,
@@ -376,8 +376,8 @@ pub fn generate_message_impl(
                 )?);
             }
             FieldKind::Repeated(f) => {
-                compute_stmts.push(repeated_compute_size_stmt(ctx, f, features)?);
-                write_stmts.push(repeated_write_to_stmt(ctx, f, features)?);
+                compute_stmts.push(repeated_compute_size_stmt(ctx, f, Some(proto_fqn), features)?);
+                write_stmts.push(repeated_write_to_stmt(ctx, f, Some(proto_fqn), features)?);
                 merge_arms.push(repeated_merge_arm(
                     ctx,
                     f,
@@ -631,12 +631,15 @@ pub(crate) fn build_view_encode_methods(
     for kind in &fields {
         match kind {
             FieldKind::Scalar(f) => {
-                compute_stmts.push(scalar_compute_size_stmt(ctx, f, features)?);
-                write_stmts.push(scalar_write_to_stmt(ctx, f, features)?);
+                // View-side emission passes `proto_fqn = None` so the
+                // `extern_field_paths` wraps short-circuit and we keep
+                // emitting unswapped `&self.field` references.
+                compute_stmts.push(scalar_compute_size_stmt(ctx, f, None, features)?);
+                write_stmts.push(scalar_write_to_stmt(ctx, f, None, features)?);
             }
             FieldKind::Repeated(f) => {
-                compute_stmts.push(repeated_compute_size_stmt(ctx, f, features)?);
-                write_stmts.push(repeated_write_to_stmt(ctx, f, features)?);
+                compute_stmts.push(repeated_compute_size_stmt(ctx, f, None, features)?);
+                write_stmts.push(repeated_write_to_stmt(ctx, f, None, features)?);
             }
             // map_{compute_size,write_to}_stmt emit `for (k, v) in &self.field
             // { ... }`. For owned `&HashMap<K,V>` that yields `(&K, &V)`
@@ -1039,6 +1042,7 @@ const fn tag_encoded_len(field_number: u32, wire_type: u8) -> u32 {
 fn scalar_compute_size_stmt(
     ctx: &CodeGenContext,
     field: &FieldDescriptorProto,
+    proto_fqn: Option<&str>,
     features: &ResolvedFeatures,
 ) -> Result<TokenStream, CodeGenError> {
     let field_name = field
@@ -1053,16 +1057,29 @@ fn scalar_compute_size_stmt(
     // equals the type default (zero / empty).  All other non-optional scalars
     // use proto3-style default-value suppression.
     let is_proto2_required = is_required_field(field, features);
+    // `extern_field_paths` only applies to owned-side emission. View-side
+    // callers pass `proto_fqn = None` so the `extern_fqn`-keyed wrap helpers
+    // become no-ops and the original field reference is emitted unchanged.
+    let extern_fqn = proto_fqn.map(|p| format!(".{}.{}", p, field_name));
+    let extern_fqn = extern_fqn.as_deref();
+    let resolver = crate::imports::ImportResolver::new();
 
     // Explicit-presence field (proto3 `optional` or proto2 `optional`): encoded as
     // Option<T>; always encode when Some regardless of the field value.
     if is_explicit_presence_scalar(field, ty, features) {
         return match ty {
-            Type::TYPE_STRING => Ok(quote! {
-                if let Some(ref v) = self.#ident {
-                    size += #tag_len + ::buffa::types::string_encoded_len(v) as u32;
-                }
-            }),
+            Type::TYPE_STRING => {
+                let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                let v_ref = match extern_fqn {
+                    Some(fqn) => ctx.wrap_extern_encode_ref(fqn, &inner_ty, quote! { v })?,
+                    None => quote! { v },
+                };
+                Ok(quote! {
+                    if let Some(ref v) = self.#ident {
+                        size += #tag_len + ::buffa::types::string_encoded_len(#v_ref) as u32;
+                    }
+                })
+            }
             Type::TYPE_BYTES => Ok(quote! {
                 if let Some(ref v) = self.#ident {
                     size += #tag_len + ::buffa::types::bytes_encoded_len(v) as u32;
@@ -1077,8 +1094,8 @@ fn scalar_compute_size_stmt(
                 // Fixed-size types (Fixed32, Float, Bool, …) use a constant;
                 // no need to bind the value, which would trigger an unused-
                 // variable warning in downstream generated code.
-                let v = quote! { v };
-                let size_expr = type_encoded_size_expr(ty, &v);
+                let extern_match = extern_fqn
+                    .and_then(|fqn| ctx.lookup_extern_field_path(fqn).map(|_| fqn));
                 if matches!(
                     ty,
                     Type::TYPE_FIXED32
@@ -1089,12 +1106,34 @@ fn scalar_compute_size_stmt(
                         | Type::TYPE_DOUBLE
                         | Type::TYPE_BOOL
                 ) {
+                    // Fixed-width size_expr is a constant and never references
+                    // the bound value, so the `is_some()` form preserves the
+                    // existing no-unused-`v` shape on both extern and
+                    // non-extern paths.
+                    let size_expr = type_encoded_size_expr(ty, &quote! { v });
                     Ok(quote! {
                         if self.#ident.is_some() {
                             size += #tag_len + #size_expr;
                         }
                     })
+                } else if let Some(fqn) = extern_match {
+                    // Extern path: bind `v: &Owned` (the field is non-`Copy`)
+                    // and route through the explicit-trait `AsRef` deref.
+                    let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                    let v_token = ctx.wrap_extern_encode_value(
+                        fqn,
+                        &inner_ty,
+                        quote! { *v },
+                        quote! { v },
+                    )?;
+                    let size_expr = type_encoded_size_expr(ty, &v_token);
+                    Ok(quote! {
+                        if let Some(ref v) = self.#ident {
+                            size += #tag_len + #size_expr;
+                        }
+                    })
                 } else {
+                    let size_expr = type_encoded_size_expr(ty, &quote! { v });
                     Ok(quote! {
                         if let Some(v) = self.#ident {
                             size += #tag_len + #size_expr;
@@ -1108,12 +1147,19 @@ fn scalar_compute_size_stmt(
     // Length-delimited and enum types need different size expressions.
     match ty {
         Type::TYPE_STRING => {
+            let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+            let field_ref = match extern_fqn {
+                Some(fqn) => {
+                    ctx.wrap_extern_encode_ref(fqn, &inner_ty, quote! { &self.#ident })?
+                }
+                None => quote! { &self.#ident },
+            };
             return Ok(if is_proto2_required {
-                quote! { size += #tag_len + ::buffa::types::string_encoded_len(&self.#ident) as u32; }
+                quote! { size += #tag_len + ::buffa::types::string_encoded_len(#field_ref) as u32; }
             } else {
                 quote! {
                     if !self.#ident.is_empty() {
-                        size += #tag_len + ::buffa::types::string_encoded_len(&self.#ident) as u32;
+                        size += #tag_len + ::buffa::types::string_encoded_len(#field_ref) as u32;
                     }
                 }
             });
@@ -1173,7 +1219,18 @@ fn scalar_compute_size_stmt(
     }
 
     // Numeric scalars.
-    let val = quote! { self.#ident };
+    let val = match extern_fqn {
+        Some(fqn) => {
+            let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+            ctx.wrap_extern_encode_value(
+                fqn,
+                &inner_ty,
+                quote! { self.#ident },
+                quote! { &self.#ident },
+            )?
+        }
+        None => quote! { self.#ident },
+    };
     let size_expr = type_encoded_size_expr(ty, &val);
     Ok(if is_proto2_required {
         quote! { size += #tag_len + #size_expr; }
@@ -1190,6 +1247,7 @@ fn scalar_compute_size_stmt(
 fn scalar_write_to_stmt(
     ctx: &CodeGenContext,
     field: &FieldDescriptorProto,
+    proto_fqn: Option<&str>,
     features: &ResolvedFeatures,
 ) -> Result<TokenStream, CodeGenError> {
     let field_name = field
@@ -1200,19 +1258,31 @@ fn scalar_write_to_stmt(
     let ty = effective_type(ctx, field, features);
     let ident = make_field_ident(field_name);
     let is_proto2_required = is_required_field(field, features);
+    // `extern_field_paths` is owned-only: views pass `proto_fqn = None` so
+    // every wrap helper short-circuits to the unswapped expression.
+    let extern_fqn = proto_fqn.map(|p| format!(".{}.{}", p, field_name));
+    let extern_fqn = extern_fqn.as_deref();
+    let resolver = crate::imports::ImportResolver::new();
 
     // Explicit-presence field: encoded as Option<T>; always encode when Some.
     if is_explicit_presence_scalar(field, ty, features) {
         return match ty {
-            Type::TYPE_STRING => Ok(quote! {
-                if let Some(ref v) = self.#ident {
-                    ::buffa::encoding::Tag::new(
-                        #field_number,
-                        ::buffa::encoding::WireType::LengthDelimited,
-                    ).encode(buf);
-                    ::buffa::types::encode_string(v, buf);
-                }
-            }),
+            Type::TYPE_STRING => {
+                let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                let v_ref = match extern_fqn {
+                    Some(fqn) => ctx.wrap_extern_encode_ref(fqn, &inner_ty, quote! { v })?,
+                    None => quote! { v },
+                };
+                Ok(quote! {
+                    if let Some(ref v) = self.#ident {
+                        ::buffa::encoding::Tag::new(
+                            #field_number,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        ).encode(buf);
+                        ::buffa::types::encode_string(#v_ref, buf);
+                    }
+                })
+            }
             Type::TYPE_BYTES => Ok(quote! {
                 if let Some(ref v) = self.#ident {
                     ::buffa::encoding::Tag::new(
@@ -1234,12 +1304,32 @@ fn scalar_write_to_stmt(
             _ => {
                 let wire_type = wire_type_token(ty);
                 let encode_fn = encode_fn_token(ty);
-                Ok(quote! {
-                    if let Some(v) = self.#ident {
-                        ::buffa::encoding::Tag::new(#field_number, #wire_type).encode(buf);
-                        #encode_fn(v, buf);
-                    }
-                })
+                let extern_match = extern_fqn
+                    .and_then(|fqn| ctx.lookup_extern_field_path(fqn).map(|_| fqn));
+                if let Some(fqn) = extern_match {
+                    // Extern path: bind `v: &Owned` (the field is non-`Copy`)
+                    // and route through the explicit-trait `AsRef` deref.
+                    let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                    let v_token = ctx.wrap_extern_encode_value(
+                        fqn,
+                        &inner_ty,
+                        quote! { *v },
+                        quote! { v },
+                    )?;
+                    Ok(quote! {
+                        if let Some(ref v) = self.#ident {
+                            ::buffa::encoding::Tag::new(#field_number, #wire_type).encode(buf);
+                            #encode_fn(#v_token, buf);
+                        }
+                    })
+                } else {
+                    Ok(quote! {
+                        if let Some(v) = self.#ident {
+                            ::buffa::encoding::Tag::new(#field_number, #wire_type).encode(buf);
+                            #encode_fn(v, buf);
+                        }
+                    })
+                }
             }
         };
     }
@@ -1247,13 +1337,20 @@ fn scalar_write_to_stmt(
     // Length-delimited and enum types need different encode calls.
     match ty {
         Type::TYPE_STRING => {
+            let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+            let field_ref = match extern_fqn {
+                Some(fqn) => {
+                    ctx.wrap_extern_encode_ref(fqn, &inner_ty, quote! { &self.#ident })?
+                }
+                None => quote! { &self.#ident },
+            };
             return Ok(if is_proto2_required {
                 quote! {
                     ::buffa::encoding::Tag::new(
                         #field_number,
                         ::buffa::encoding::WireType::LengthDelimited,
                     ).encode(buf);
-                    ::buffa::types::encode_string(&self.#ident, buf);
+                    ::buffa::types::encode_string(#field_ref, buf);
                 }
             } else {
                 quote! {
@@ -1262,7 +1359,7 @@ fn scalar_write_to_stmt(
                             #field_number,
                             ::buffa::encoding::WireType::LengthDelimited,
                         ).encode(buf);
-                        ::buffa::types::encode_string(&self.#ident, buf);
+                        ::buffa::types::encode_string(#field_ref, buf);
                     }
                 }
             });
@@ -1348,17 +1445,29 @@ fn scalar_write_to_stmt(
     // Numeric scalars: encode by value.
     let wire_type = wire_type_token(ty);
     let encode_fn = encode_fn_token(ty);
+    let val = match extern_fqn {
+        Some(fqn) => {
+            let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+            ctx.wrap_extern_encode_value(
+                fqn,
+                &inner_ty,
+                quote! { self.#ident },
+                quote! { &self.#ident },
+            )?
+        }
+        None => quote! { self.#ident },
+    };
     Ok(if is_proto2_required {
         quote! {
             ::buffa::encoding::Tag::new(#field_number, #wire_type).encode(buf);
-            #encode_fn(self.#ident, buf);
+            #encode_fn(#val, buf);
         }
     } else {
         let is_non_default = is_non_default_expr(ty, &ident);
         quote! {
             if #is_non_default {
                 ::buffa::encoding::Tag::new(#field_number, #wire_type).encode(buf);
-                #encode_fn(self.#ident, buf);
+                #encode_fn(#val, buf);
             }
         }
     })
@@ -1368,7 +1477,12 @@ fn scalar_write_to_stmt(
 ///
 /// Emits `field_number => { wire_check; self.field = Some(decoded_value); }`.
 /// Proto3 optional fields and proto2 optional non-message fields use this path.
+///
+/// `extern_fqn` is the fully-qualified field path (`".Pkg.Msg.field"`) used to
+/// look up an `extern_field_paths` entry; pass `None` to disable extern wrapping.
+#[allow(clippy::too_many_arguments)]
 fn explicit_presence_merge_arm(
+    ctx: &CodeGenContext,
     ident: &Ident,
     field_number: u32,
     ty: Type,
@@ -1376,17 +1490,38 @@ fn explicit_presence_merge_arm(
     wire_check: &TokenStream,
     use_bytes: bool,
     preserve_unknown_fields: bool,
-) -> TokenStream {
-    match ty {
-        Type::TYPE_STRING => quote! {
-            #field_number => {
-                #wire_check
-                ::buffa::types::merge_string(
-                    self.#ident.get_or_insert_with(::buffa::alloc::string::String::new),
-                    buf,
-                )?;
+    extern_fqn: Option<&str>,
+) -> Result<TokenStream, CodeGenError> {
+    let resolver = crate::imports::ImportResolver::new();
+    let extern_match = extern_fqn.and_then(|fqn| ctx.lookup_extern_field_path(fqn).map(|_| fqn));
+    Ok(match ty {
+        Type::TYPE_STRING => {
+            // The merge_string fast path requires `&mut String`, which a
+            // wrapper `Owned` type cannot expose. When extern is configured,
+            // decode-then-replace via `From<String>`. When not, keep the
+            // existing in-place merge so the unswapped emit is byte-identical.
+            if let Some(fqn) = extern_match {
+                let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                let decoded =
+                    ctx.wrap_extern_decode(fqn, &inner_ty, quote! { ::buffa::types::decode_string(buf)? })?;
+                quote! {
+                    #field_number => {
+                        #wire_check
+                        self.#ident = ::core::option::Option::Some(#decoded);
+                    }
+                }
+            } else {
+                quote! {
+                    #field_number => {
+                        #wire_check
+                        ::buffa::types::merge_string(
+                            self.#ident.get_or_insert_with(::buffa::alloc::string::String::new),
+                            buf,
+                        )?;
+                    }
+                }
             }
-        },
+        }
         Type::TYPE_BYTES => {
             if use_bytes {
                 // bytes::Bytes is immutable — can't merge in place.
@@ -1440,14 +1575,21 @@ fn explicit_presence_merge_arm(
         }
         _ => {
             let decode_fn = decode_fn_token(ty);
+            let decoded = match extern_fqn {
+                Some(fqn) => {
+                    let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                    ctx.wrap_extern_decode(fqn, &inner_ty, quote! { #decode_fn(buf)? })?
+                }
+                None => quote! { #decode_fn(buf)? },
+            };
             quote! {
                 #field_number => {
                     #wire_check
-                    self.#ident = ::core::option::Option::Some(#decode_fn(buf)?);
+                    self.#ident = ::core::option::Option::Some(#decoded);
                 }
             }
         }
-    }
+    })
 }
 
 fn scalar_merge_arm(
@@ -1468,12 +1610,16 @@ fn scalar_merge_arm(
     let ident = make_field_ident(field_name);
     let wire_type = wire_type_token(ty);
     let expected_byte = wire_type_byte(ty);
+    let extern_fqn_string = format!(".{}.{}", proto_fqn, field_name);
+    let extern_fqn = Some(extern_fqn_string.as_str());
+    let resolver = crate::imports::ImportResolver::new();
 
     let wire_check = wire_type_check(field_number, &wire_type, expected_byte);
 
     // Explicit-presence field: assign Some(decoded_value).
     if is_explicit_presence_scalar(field, ty, features) {
-        return Ok(explicit_presence_merge_arm(
+        return explicit_presence_merge_arm(
+            ctx,
             &ident,
             field_number,
             ty,
@@ -1481,7 +1627,8 @@ fn scalar_merge_arm(
             &wire_check,
             use_bytes,
             preserve_unknown_fields,
-        ));
+            extern_fqn,
+        );
     }
 
     // Length-delimited and enum types need different decode calls.
@@ -1494,6 +1641,24 @@ fn scalar_merge_arm(
     // decode_bytes which always allocate a fresh Vec/String.
     match ty {
         Type::TYPE_STRING => {
+            // The merge_string fast path requires `&mut String`, which a
+            // wrapper `Owned` type cannot expose. When extern is configured,
+            // decode-then-replace via `From<String>`.
+            if let Some(entry) = ctx.lookup_extern_field_path(&extern_fqn_string) {
+                let _ = entry;
+                let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                let decoded = ctx.wrap_extern_decode(
+                    &extern_fqn_string,
+                    &inner_ty,
+                    quote! { ::buffa::types::decode_string(buf)? },
+                )?;
+                return Ok(quote! {
+                    #field_number => {
+                        #wire_check
+                        self.#ident = #decoded;
+                    }
+                });
+            }
             return Ok(quote! {
                 #field_number => {
                     #wire_check
@@ -1574,10 +1739,17 @@ fn scalar_merge_arm(
 
     // Numeric scalars (proto3 last-wins: plain assignment overwrites any prior value).
     let decode_fn = decode_fn_token(ty);
+    let decoded = match extern_fqn {
+        Some(fqn) => {
+            let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+            ctx.wrap_extern_decode(fqn, &inner_ty, quote! { #decode_fn(buf)? })?
+        }
+        None => quote! { #decode_fn(buf)? },
+    };
     Ok(quote! {
         #field_number => {
             #wire_check
-            self.#ident = #decode_fn(buf)?;
+            self.#ident = #decoded;
         }
     })
 }
@@ -1635,8 +1807,16 @@ pub(crate) fn is_field_packed(field: &FieldDescriptorProto, features: &ResolvedF
 
 /// Generate the payload-size expression for a packed repeated field.
 /// The expression evaluates to a `u32` at runtime.
-fn repeated_payload_size_expr(ty: Type, ident: &Ident) -> TokenStream {
-    match ty {
+///
+/// `extern_fqn` is the fully-qualified field path for `extern_field_paths`
+/// lookup; pass `None` for view-side emission to skip the extern wrap.
+fn repeated_payload_size_expr(
+    ctx: &CodeGenContext,
+    ty: Type,
+    ident: &Ident,
+    extern_fqn: Option<&str>,
+) -> Result<TokenStream, CodeGenError> {
+    Ok(match ty {
         Type::TYPE_FIXED32 | Type::TYPE_SFIXED32 | Type::TYPE_FLOAT => {
             quote! { self.#ident.len() as u32 * ::buffa::types::FIXED32_ENCODED_LEN as u32 }
         }
@@ -1657,16 +1837,42 @@ fn repeated_payload_size_expr(ty: Type, ident: &Ident) -> TokenStream {
         _ => {
             // Varint-sized numeric scalars (Int32, Int64, Uint32, Uint64, Sint32, Sint64):
             // element size depends on the encoded value, so compute per-element via map.
-            let v = quote! { v };
-            let size_expr = type_encoded_size_expr(ty, &v);
-            quote! { self.#ident.iter().map(|&v| #size_expr).sum::<u32>() }
+            // For extern-typed fields, the loop binding is `&Owned`, not `&Inner`,
+            // so unwrap with an explicit-trait `AsRef` deref before sizing.
+            let resolver = crate::imports::ImportResolver::new();
+            let v_token = match extern_fqn {
+                Some(fqn) => {
+                    let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                    ctx.wrap_extern_encode_value(
+                        fqn,
+                        &inner_ty,
+                        quote! { *v },
+                        quote! { v },
+                    )?
+                }
+                None => quote! { *v },
+            };
+            let size_expr = type_encoded_size_expr(ty, &v_token);
+            // The loop binding is `v: &Inner` for the unswapped (Copy) path;
+            // re-using the existing `|&v|` destructuring keeps the unswapped
+            // emit byte-identical. For the swapped path, change to `|v|` so
+            // the binding is `&Owned` and the wrap helper can dereference.
+            if extern_fqn
+                .and_then(|fqn| ctx.lookup_extern_field_path(fqn))
+                .is_some()
+            {
+                quote! { self.#ident.iter().map(|v| #size_expr).sum::<u32>() }
+            } else {
+                quote! { self.#ident.iter().map(|&v| #size_expr).sum::<u32>() }
+            }
         }
-    }
+    })
 }
 
 fn repeated_compute_size_stmt(
     ctx: &CodeGenContext,
     field: &FieldDescriptorProto,
+    proto_fqn: Option<&str>,
     features: &ResolvedFeatures,
 ) -> Result<TokenStream, CodeGenError> {
     let field_name = field
@@ -1676,6 +1882,10 @@ fn repeated_compute_size_stmt(
     let field_number = validated_field_number(field)?;
     let ty = effective_type(ctx, field, features);
     let ident = make_field_ident(field_name);
+    // `extern_field_paths` is owned-only; views pass `proto_fqn = None`.
+    let extern_fqn = proto_fqn.map(|p| format!(".{}.{}", p, field_name));
+    let extern_fqn = extern_fqn.as_deref();
+    let resolver = crate::imports::ImportResolver::new();
     // LengthDelimited tag (wire type 2): used for packed, message, string, bytes.
     let ld_tag_len = tag_encoded_len(field_number, 2);
     // Per-element tag using the field's own wire type: used for unpacked numerics.
@@ -1732,7 +1942,12 @@ fn repeated_compute_size_stmt(
         }
         let per_elem_size = match ty {
             Type::TYPE_STRING => {
-                quote! { size += #ld_tag_len + ::buffa::types::string_encoded_len(v) as u32; }
+                let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                let v_ref = match extern_fqn {
+                    Some(fqn) => ctx.wrap_extern_encode_ref(fqn, &inner_ty, quote! { v })?,
+                    None => quote! { v },
+                };
+                quote! { size += #ld_tag_len + ::buffa::types::string_encoded_len(#v_ref) as u32; }
             }
             Type::TYPE_BYTES => {
                 quote! { size += #ld_tag_len + ::buffa::types::bytes_encoded_len(v) as u32; }
@@ -1741,8 +1956,19 @@ fn repeated_compute_size_stmt(
                 quote! { size += #elem_tag_len + ::buffa::types::int32_encoded_len(v.to_i32()) as u32; }
             }
             _ => {
-                let deref_v = quote! { *v };
-                let size_expr = type_encoded_size_expr(ty, &deref_v);
+                let v_token = match extern_fqn {
+                    Some(fqn) => {
+                        let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                        ctx.wrap_extern_encode_value(
+                            fqn,
+                            &inner_ty,
+                            quote! { *v },
+                            quote! { v },
+                        )?
+                    }
+                    None => quote! { *v },
+                };
+                let size_expr = type_encoded_size_expr(ty, &v_token);
                 quote! { size += #elem_tag_len + #size_expr; }
             }
         };
@@ -1751,7 +1977,7 @@ fn repeated_compute_size_stmt(
         });
     }
     // Packed: single LengthDelimited tag + varint payload length + elements.
-    let payload_expr = repeated_payload_size_expr(ty, &ident);
+    let payload_expr = repeated_payload_size_expr(ctx, ty, &ident, extern_fqn)?;
     Ok(quote! {
         if !self.#ident.is_empty() {
             let payload: u32 = #payload_expr;
@@ -1763,6 +1989,7 @@ fn repeated_compute_size_stmt(
 fn repeated_write_to_stmt(
     ctx: &CodeGenContext,
     field: &FieldDescriptorProto,
+    proto_fqn: Option<&str>,
     features: &ResolvedFeatures,
 ) -> Result<TokenStream, CodeGenError> {
     let field_name = field
@@ -1772,6 +1999,10 @@ fn repeated_write_to_stmt(
     let field_number = validated_field_number(field)?;
     let ty = effective_type(ctx, field, features);
     let ident = make_field_ident(field_name);
+    // `extern_field_paths` is owned-only; views pass `proto_fqn = None`.
+    let extern_fqn = proto_fqn.map(|p| format!(".{}.{}", p, field_name));
+    let extern_fqn = extern_fqn.as_deref();
+    let resolver = crate::imports::ImportResolver::new();
 
     if ty == Type::TYPE_MESSAGE {
         return Ok(quote! {
@@ -1804,12 +2035,31 @@ fn repeated_write_to_stmt(
         // Unpacked: each element emits its own tag + value.
         let wire_type = wire_type_token(ty);
         let per_elem_encode = match ty {
-            Type::TYPE_STRING => quote! { ::buffa::types::encode_string(v, buf); },
+            Type::TYPE_STRING => {
+                let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                let v_ref = match extern_fqn {
+                    Some(fqn) => ctx.wrap_extern_encode_ref(fqn, &inner_ty, quote! { v })?,
+                    None => quote! { v },
+                };
+                quote! { ::buffa::types::encode_string(#v_ref, buf); }
+            }
             Type::TYPE_BYTES => quote! { ::buffa::types::encode_bytes(v, buf); },
             Type::TYPE_ENUM => quote! { ::buffa::types::encode_int32(v.to_i32(), buf); },
             _ => {
                 let encode_fn = encode_fn_token(ty);
-                quote! { #encode_fn(*v, buf); }
+                let v_token = match extern_fqn {
+                    Some(fqn) => {
+                        let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                        ctx.wrap_extern_encode_value(
+                            fqn,
+                            &inner_ty,
+                            quote! { *v },
+                            quote! { v },
+                        )?
+                    }
+                    None => quote! { *v },
+                };
+                quote! { #encode_fn(#v_token, buf); }
             }
         };
         return Ok(quote! {
@@ -1820,12 +2070,30 @@ fn repeated_write_to_stmt(
         });
     }
     // Packed.
-    let payload_expr = repeated_payload_size_expr(ty, &ident);
+    let payload_expr = repeated_payload_size_expr(ctx, ty, &ident, extern_fqn)?;
     let encode_loop = if ty == Type::TYPE_ENUM {
         quote! { for v in &self.#ident { ::buffa::types::encode_int32(v.to_i32(), buf); } }
     } else {
         let encode_fn = encode_fn_token(ty);
-        quote! { for &v in &self.#ident { #encode_fn(v, buf); } }
+        // For extern-typed packed numerics the loop binds `&Owned`, so unwrap
+        // through the explicit-trait `AsRef` deref. The unswapped path keeps
+        // the existing `for &v in &self.#ident` destructuring (T: Copy) so the
+        // emit is byte-identical when no extern entry matches.
+        if extern_fqn
+            .and_then(|fqn| ctx.lookup_extern_field_path(fqn))
+            .is_some()
+        {
+            let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+            let v_token = ctx.wrap_extern_encode_value(
+                extern_fqn.expect("checked above"),
+                &inner_ty,
+                quote! { *v },
+                quote! { v },
+            )?;
+            quote! { for v in &self.#ident { #encode_fn(#v_token, buf); } }
+        } else {
+            quote! { for &v in &self.#ident { #encode_fn(v, buf); } }
+        }
     };
     Ok(quote! {
         if !self.#ident.is_empty() {
@@ -1856,6 +2124,8 @@ fn repeated_merge_arm(
     let ty = effective_type(ctx, field, features);
     let use_bytes = ty == Type::TYPE_BYTES && field_uses_bytes(ctx, proto_fqn, field_name);
     let ident = make_field_ident(field_name);
+    let extern_fqn = format!(".{}.{}", proto_fqn, field_name);
+    let resolver = crate::imports::ImportResolver::new();
 
     if ty == Type::TYPE_MESSAGE {
         let wire_check = wire_type_check(
@@ -1894,7 +2164,14 @@ fn repeated_merge_arm(
             2u8,
         );
         let decode_expr = match ty {
-            Type::TYPE_STRING => quote! { ::buffa::types::decode_string(buf)? },
+            Type::TYPE_STRING => {
+                let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                ctx.wrap_extern_decode(
+                    &extern_fqn,
+                    &inner_ty,
+                    quote! { ::buffa::types::decode_string(buf)? },
+                )?
+            }
             Type::TYPE_BYTES => {
                 if use_bytes {
                     quote! { ::buffa::bytes::Bytes::from(::buffa::types::decode_bytes(buf)?) }
@@ -1929,7 +2206,10 @@ fn repeated_merge_arm(
         }
     } else {
         let decode_fn = decode_fn_token(ty);
-        quote! { self.#ident.push(#decode_fn(&mut limited)?); }
+        let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+        let decoded =
+            ctx.wrap_extern_decode(&extern_fqn, &inner_ty, quote! { #decode_fn(&mut limited)? })?;
+        quote! { self.#ident.push(#decoded); }
     };
     // Unpacked path: decode a single element from the outer buffer.
     let decode_unpacked_elem = if ty == Type::TYPE_ENUM {
@@ -1940,7 +2220,10 @@ fn repeated_merge_arm(
         }
     } else {
         let decode_fn = decode_fn_token(ty);
-        quote! { self.#ident.push(#decode_fn(buf)?); }
+        let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+        let decoded =
+            ctx.wrap_extern_decode(&extern_fqn, &inner_ty, quote! { #decode_fn(buf)? })?;
+        quote! { self.#ident.push(#decoded); }
     };
     // Pre-allocation hint for the packed decode loop: avoids repeated
     // reallocation. Fixed-size types get the exact element count; variable-
