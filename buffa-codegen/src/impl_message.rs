@@ -985,23 +985,27 @@ pub(crate) fn decode_fn_token(ty: Type) -> TokenStream {
     }
 }
 
-pub(crate) fn is_non_default_expr(ty: Type, field_ident: &Ident) -> TokenStream {
+/// `value_expr` must evaluate to `Inner` (the bare scalar Rust type buffa
+/// would have emitted — `i32`, `u32`, `f32`, `bool`, ...). For extern-wrapped
+/// fields, callers pass the explicit-trait `*<Owned as AsRef<Inner>>::as_ref(...)`
+/// form so the comparison still resolves against the inner scalar type.
+pub(crate) fn is_non_default_expr(ty: Type, value_expr: &TokenStream) -> TokenStream {
     match ty {
         Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => {
-            quote! { self.#field_ident != 0i32 }
+            quote! { #value_expr != 0i32 }
         }
         Type::TYPE_INT64 | Type::TYPE_SINT64 | Type::TYPE_SFIXED64 => {
-            quote! { self.#field_ident != 0i64 }
+            quote! { #value_expr != 0i64 }
         }
-        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => quote! { self.#field_ident != 0u32 },
-        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => quote! { self.#field_ident != 0u64 },
+        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => quote! { #value_expr != 0u32 },
+        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => quote! { #value_expr != 0u64 },
         // Float presence is by bit pattern: `to_bits() != 0` is true for NaN
         // (serialized) and for -0.0 (also serialized — the proto3 spec treats
         // only IEEE +0.0 as the default, and the conformance suite checks
         // that -0.0 round-trips through an implicit-presence field).
-        Type::TYPE_FLOAT => quote! { self.#field_ident.to_bits() != 0u32 },
-        Type::TYPE_DOUBLE => quote! { self.#field_ident.to_bits() != 0u64 },
-        Type::TYPE_BOOL => quote! { self.#field_ident },
+        Type::TYPE_FLOAT => quote! { #value_expr.to_bits() != 0u32 },
+        Type::TYPE_DOUBLE => quote! { #value_expr.to_bits() != 0u64 },
+        Type::TYPE_BOOL => quote! { #value_expr },
         _ => unreachable!("is_non_default_expr called for non-numeric type {:?}", ty),
     }
 }
@@ -1235,7 +1239,7 @@ fn scalar_compute_size_stmt(
     Ok(if is_proto2_required {
         quote! { size += #tag_len + #size_expr; }
     } else {
-        let is_non_default = is_non_default_expr(ty, &ident);
+        let is_non_default = is_non_default_expr(ty, &val);
         quote! {
             if #is_non_default {
                 size += #tag_len + #size_expr;
@@ -1463,7 +1467,7 @@ fn scalar_write_to_stmt(
             #encode_fn(#val, buf);
         }
     } else {
-        let is_non_default = is_non_default_expr(ty, &ident);
+        let is_non_default = is_non_default_expr(ty, &val);
         quote! {
             if #is_non_default {
                 ::buffa::encoding::Tag::new(#field_number, #wire_type).encode(buf);
@@ -1644,8 +1648,7 @@ fn scalar_merge_arm(
             // The merge_string fast path requires `&mut String`, which a
             // wrapper `Owned` type cannot expose. When extern is configured,
             // decode-then-replace via `From<String>`.
-            if let Some(entry) = ctx.lookup_extern_field_path(&extern_fqn_string) {
-                let _ = entry;
+            if ctx.lookup_extern_field_path(&extern_fqn_string).is_some() {
                 let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
                 let decoded = ctx.wrap_extern_decode(
                     &extern_fqn_string,
@@ -2079,20 +2082,18 @@ fn repeated_write_to_stmt(
         // through the explicit-trait `AsRef` deref. The unswapped path keeps
         // the existing `for &v in &self.#ident` destructuring (T: Copy) so the
         // emit is byte-identical when no extern entry matches.
-        if extern_fqn
-            .and_then(|fqn| ctx.lookup_extern_field_path(fqn))
-            .is_some()
-        {
-            let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-            let v_token = ctx.wrap_extern_encode_value(
-                extern_fqn.expect("checked above"),
-                &inner_ty,
-                quote! { *v },
-                quote! { v },
-            )?;
-            quote! { for v in &self.#ident { #encode_fn(#v_token, buf); } }
-        } else {
-            quote! { for &v in &self.#ident { #encode_fn(v, buf); } }
+        match extern_fqn.filter(|fqn| ctx.lookup_extern_field_path(fqn).is_some()) {
+            Some(fqn) => {
+                let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                let v_token = ctx.wrap_extern_encode_value(
+                    fqn,
+                    &inner_ty,
+                    quote! { *v },
+                    quote! { v },
+                )?;
+                quote! { for v in &self.#ident { #encode_fn(#v_token, buf); } }
+            }
+            None => quote! { for &v in &self.#ident { #encode_fn(v, buf); } },
         }
     };
     Ok(quote! {

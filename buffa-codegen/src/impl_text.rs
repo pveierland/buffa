@@ -551,7 +551,7 @@ fn scalar_encode_stmt(
             #write
         });
     }
-    let check = is_non_default_expr(ty, &ident);
+    let check = is_non_default_expr(ty, &quote! { self.#ident });
     Ok(quote! {
         if #check {
             enc.write_field_name(#name_lit)?;

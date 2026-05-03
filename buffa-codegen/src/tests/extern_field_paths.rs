@@ -217,3 +217,44 @@ fn owned_numeric_extern_uses_explicit_from_and_as_ref() {
         "numeric encode site must use explicit-trait AsRef + deref: {content}"
     );
 }
+
+/// Implicit-presence numeric extern: the `is_non_default_expr` guard at
+/// scalar size and write_to sites must use the unwrapped Inner value, not
+/// `self.#ident` directly. Without this, `self.#ident != 0u32` would require
+/// `Owned: PartialEq<u32>`, which the extern trait contract does not require.
+#[test]
+fn owned_implicit_presence_numeric_extern_wraps_default_check() {
+    let mut file = proto3_file("ext_implicit_numeric.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field(
+            "idx",
+            1,
+            Label::LABEL_OPTIONAL,
+            Type::TYPE_UINT32,
+        )],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.idx",
+        "crate::wrap::Idx",
+    )]);
+    let files = generate(
+        &[file],
+        &["ext_implicit_numeric.proto".to_string()],
+        &config,
+    )
+    .expect("should generate");
+    let content = joined(&files);
+
+    // The non-default check must compare the wrapped *inner* value, not the
+    // wrapper directly. Look for the AsRef-deref form on the LHS of the != .
+    assert!(
+        contains_normalized(
+            &content,
+            "*<crate::wrap::Idx as ::core::convert::AsRef<u32>>::as_ref(&self.idx) != 0u32"
+        ),
+        "implicit-presence numeric default check must wrap the value: {content}"
+    );
+}
