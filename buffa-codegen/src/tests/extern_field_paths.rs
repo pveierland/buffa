@@ -541,3 +541,66 @@ fn numeric_field_with_view_path_is_build_error() {
         "error must explain the view_path-on-numeric mismatch: {msg}"
     );
 }
+
+#[test]
+fn extern_field_path_on_bytes_is_build_error() {
+    let mut file = proto3_file("ext_bytes_err.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field(
+            "data",
+            1,
+            Label::LABEL_OPTIONAL,
+            Type::TYPE_BYTES,
+        )],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.data",
+        "crate::wrap::Data",
+    )]);
+    let err = generate(&[file], &["ext_bytes_err.proto".to_string()], &config)
+        .unwrap_err();
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("extern_field_path") && msg.contains("TYPE_BYTES"),
+        "error must explain the rejection: {msg}"
+    );
+}
+
+#[test]
+fn extern_field_path_on_message_is_build_error() {
+    let mut file = proto3_file("ext_msg_err.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Inner".to_string()),
+        field: vec![],
+        ..Default::default()
+    });
+    file.message_type.push(DescriptorProto {
+        name: Some("Outer".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("inner".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_MESSAGE),
+            type_name: Some(".Inner".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Outer.inner",
+        "crate::wrap::Inner",
+    )]);
+    let err = generate(&[file], &["ext_msg_err.proto".to_string()], &config)
+        .unwrap_err();
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("extern_field_path") && msg.contains("TYPE_MESSAGE"),
+        "error must explain the rejection: {msg}"
+    );
+}

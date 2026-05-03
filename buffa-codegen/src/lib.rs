@@ -518,13 +518,23 @@ pub enum IncludeMode<'a> {
     OutDir,
 }
 
-/// Validate that no `extern_field_paths` entry with a `view_path` set is
-/// matched against a non-`TYPE_STRING` field in any file being generated.
+/// Validate all `extern_field_paths` entries in any file being generated.
 ///
-/// View paths are meaningful only for string-backed fields: the view type
-/// borrows a `&str` slice from the wire buffer and wraps it. Numeric scalars
-/// are stored by value in views, so there is no borrowed counterpart — a
-/// `view_path` on a numeric field is always a configuration mistake.
+/// Two checks are performed for each field that matches an entry:
+///
+/// 1. **Wire-type guard** — `extern_field_path` is only supported for
+///    `TYPE_STRING` and numeric scalar types (`TYPE_INT32` through
+///    `TYPE_DOUBLE`). Using it on `TYPE_BYTES`, `TYPE_MESSAGE`,
+///    `TYPE_GROUP`, `TYPE_ENUM`, or `TYPE_BOOL` is a configuration error.
+///    Two silent exceptions apply:
+///    - A `TYPE_BYTES` field already covered by `bytes_fields` silently skips
+///      (the bytes guard already wins; precedence semantics from Task 7).
+///    - A `TYPE_MESSAGE` field that is a map field silently skips (codegen
+///      already no-ops extern entries on map fields).
+///
+/// 2. **View-path guard** — `view_path` is meaningful only for
+///    `TYPE_STRING` fields. A `view_path` on any numeric scalar is a
+///    configuration mistake.
 ///
 /// Only files listed in `files_to_generate` are walked; dependency files are
 /// not the caller's responsibility and are excluded.
@@ -532,7 +542,7 @@ pub enum IncludeMode<'a> {
 /// # Errors
 ///
 /// Returns [`CodeGenError::Other`] naming the offending field FQN and its
-/// actual wire type when a `view_path`-on-non-string mismatch is detected.
+/// actual wire type when either constraint is violated.
 fn validate_extern_field_paths(
     ctx: &context::CodeGenContext,
     file_descriptors: &[FileDescriptorProto],
@@ -579,11 +589,50 @@ fn walk_messages_for_extern_validation(
             let Some(entry) = ctx.lookup_extern_field_path(&field_fqn) else {
                 continue;
             };
-            if entry.view_path.is_none() {
-                continue;
-            }
             let wire_type = field.r#type.unwrap_or_default();
-            if wire_type != Type::TYPE_STRING {
+
+            // Allowed wire types for extern_field_path: string + numeric scalars.
+            let is_allowed = matches!(
+                wire_type,
+                Type::TYPE_STRING
+                    | Type::TYPE_INT32
+                    | Type::TYPE_UINT32
+                    | Type::TYPE_SINT32
+                    | Type::TYPE_FIXED32
+                    | Type::TYPE_SFIXED32
+                    | Type::TYPE_INT64
+                    | Type::TYPE_UINT64
+                    | Type::TYPE_SINT64
+                    | Type::TYPE_FIXED64
+                    | Type::TYPE_SFIXED64
+                    | Type::TYPE_FLOAT
+                    | Type::TYPE_DOUBLE
+            );
+
+            if !is_allowed {
+                // Special case: TYPE_BYTES covered by bytes_fields → silent precedence
+                // (the use_bytes guard already prevents the swap; existing tests pin
+                // this behavior). Without bytes_fields covering it, the user has
+                // misused extern_field_path on a bytes field — reject with a clear error.
+                if wire_type == Type::TYPE_BYTES && ctx.use_bytes_type(&field_fqn) {
+                    continue;
+                }
+                // Special case: map fields have TYPE_MESSAGE but are silently skipped
+                // by codegen (the extern entry is a no-op), so don't reject them here.
+                if wire_type == Type::TYPE_MESSAGE
+                    && crate::message::find_map_entry(msg, field).is_some()
+                {
+                    continue;
+                }
+                return Err(CodeGenError::Other(format!(
+                    "extern_field_path is set for field '{field_fqn}' but its wire type is \
+                     {wire_type:?} — only TYPE_STRING and numeric scalar types are supported. \
+                     For TYPE_BYTES use `bytes_fields`; for TYPE_MESSAGE / TYPE_GROUP use \
+                     `extern_paths`; TYPE_ENUM and TYPE_BOOL have no extern_field_path support."
+                )));
+            }
+
+            if entry.view_path.is_some() && wire_type != Type::TYPE_STRING {
                 return Err(CodeGenError::Other(format!(
                     "extern_field_view_path (view_path) is set for field '{field_fqn}' but its \
                      wire type is {wire_type:?}, not TYPE_STRING — view paths are meaningful \
