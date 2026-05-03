@@ -123,13 +123,13 @@ pub enum GeneratedFileKind {
     PackageMod,
 }
 
-/// User-supplied per-field type swap. See `CodeGenConfig::extern_field_paths`.
-#[derive(Debug, Clone)]
+/// User-supplied per-field type swap. See [`CodeGenConfig::extern_field_paths`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ExternFieldPath {
     /// Fully-qualified proto field path prefix (e.g. `".my.pkg.MyMessage.my_field"`).
     /// Matched against fields using proto-segment-aware prefix matching, mirroring
-    /// `bytes_fields` and `extern_path`.
+    /// `bytes_fields` and `extern_paths`.
     pub fqn_prefix: String,
     /// Rust path used for the owned struct field type.
     pub owned_path: String,
@@ -142,7 +142,9 @@ pub struct ExternFieldPath {
 }
 
 impl ExternFieldPath {
-    /// Convenience constructor; `view_path` defaults to `None`.
+    /// Convenience constructor; `view_path` defaults to `None`, meaning
+    /// views fall back to the underlying scalar (zero-copy).
+    #[must_use]
     pub fn new(fqn_prefix: impl Into<String>, owned_path: impl Into<String>) -> Self {
         Self {
             fqn_prefix: fqn_prefix.into(),
@@ -151,7 +153,11 @@ impl ExternFieldPath {
         }
     }
 
-    /// Builder-style: set the view path.
+    /// Builder-style: set the view-side type path.
+    ///
+    /// See [`view_path`](Self::view_path) for the contract; this is meaningful
+    /// only for `TYPE_STRING` fields and is validated at `generate` time.
+    #[must_use]
     pub fn with_view_path(mut self, view_path: impl Into<String>) -> Self {
         self.view_path = Some(view_path.into());
         self
