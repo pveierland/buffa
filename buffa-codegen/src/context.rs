@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::features::{self, ResolvedFeatures};
 use crate::generated::descriptor::{DescriptorProto, EnumDescriptorProto, FileDescriptorProto};
 use crate::oneof::to_snake_case;
-use crate::CodeGenConfig;
+use crate::{CodeGenConfig, ExternFieldPath};
 
 /// The single reserved module name under which all ancillary generated types
 /// (views, oneof enums, extensions, `register_types`) live.
@@ -496,6 +496,17 @@ impl<'a> CodeGenContext<'a> {
             .bytes_fields
             .iter()
             .any(|prefix| matches_proto_prefix(prefix, field_fqn))
+    }
+
+    /// Look up the extern field path entry, if any, that matches `field_fqn`.
+    /// Returns the first matching entry — caller-provided ordering applies.
+    /// `field_fqn` follows the same `".pkg.Msg.field"` convention as
+    /// `field_attributes` and `bytes_fields`.
+    pub fn lookup_extern_field_path(&self, field_fqn: &str) -> Option<&ExternFieldPath> {
+        self.config
+            .extern_field_paths
+            .iter()
+            .find(|entry| matches_proto_prefix(&entry.fqn_prefix, field_fqn))
     }
 }
 
