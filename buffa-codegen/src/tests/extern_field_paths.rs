@@ -258,3 +258,122 @@ fn owned_implicit_presence_numeric_extern_wraps_default_check() {
         "implicit-presence numeric default check must wrap the value: {content}"
     );
 }
+
+#[test]
+fn map_field_skips_extern_path() {
+    let mut file = proto3_file("ext_map.proto");
+    let map_entry = DescriptorProto {
+        name: Some("StringsEntry".to_string()),
+        field: vec![
+            make_field("key", 1, Label::LABEL_OPTIONAL, Type::TYPE_STRING),
+            make_field("value", 2, Label::LABEL_OPTIONAL, Type::TYPE_STRING),
+        ],
+        options: Some(MessageOptions {
+            map_entry: Some(true),
+            ..Default::default()
+        })
+        .into(),
+        ..Default::default()
+    };
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        nested_type: vec![map_entry],
+        field: vec![FieldDescriptorProto {
+            name: Some("strings".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_REPEATED),
+            r#type: Some(Type::TYPE_MESSAGE),
+            type_name: Some(".Msg.StringsEntry".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    // Try to swap the map field — should be silently no-op.
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.strings",
+        "crate::wrap::ShouldNotAppear",
+    )]);
+    let files = generate(&[file], &["ext_map.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        !content.contains("ShouldNotAppear"),
+        "extern path on a map field must be silently skipped: {content}"
+    );
+}
+
+#[test]
+fn bytes_fields_takes_precedence_over_extern_path() {
+    let mut file = proto3_file("ext_bytes.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field(
+            "data",
+            1,
+            Label::LABEL_OPTIONAL,
+            Type::TYPE_BYTES,
+        )],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: false,
+        bytes_fields: vec![".".to_string()],
+        extern_field_paths: vec![ExternFieldPath::new(
+            ".Msg.data",
+            "crate::wrap::ShouldNotAppear",
+        )],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_bytes.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        content.contains("::buffa::bytes::Bytes"),
+        "bytes_fields should still apply: {content}"
+    );
+    assert!(
+        !content.contains("ShouldNotAppear"),
+        "extern path must lose to bytes_fields: {content}"
+    );
+}
+
+#[test]
+fn bytes_fields_takes_precedence_over_extern_path_repeated() {
+    let mut file = proto3_file("ext_bytes_rep.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field(
+            "blobs",
+            1,
+            Label::LABEL_REPEATED,
+            Type::TYPE_BYTES,
+        )],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: false,
+        bytes_fields: vec![".".to_string()],
+        extern_field_paths: vec![ExternFieldPath::new(
+            ".Msg.blobs",
+            "crate::wrap::ShouldNotAppear",
+        )],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_bytes_rep.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        content.contains("Vec<::buffa::bytes::Bytes>"),
+        "repeated bytes should still be Vec<Bytes>: {content}"
+    );
+    assert!(
+        !content.contains("ShouldNotAppear"),
+        "extern path must lose to bytes_fields for repeated bytes too: {content}"
+    );
+}
