@@ -1099,7 +1099,13 @@ fn classify_field(
     // because the lookup is consulted only inside the non-map branches below;
     // bytes_fields takes precedence by an explicit `use_bytes` guard so a
     // bytes-typed field that also matches an extern entry stays as bytes.
-    let extern_field = if !use_bytes {
+    //
+    // Defensive: real oneof variants are out of scope for extern_field_paths.
+    // The config generator rejects these at build time; this guard is
+    // defense-in-depth for hand-rolled configs that slip one through.
+    // Synthetic oneofs (proto3 optional) are presence markers, not real
+    // variants — those are preserved.
+    let extern_field = if !use_bytes && !is_real_oneof_member(field) {
         ctx.lookup_extern_field_path(&field_fqn)
     } else {
         None

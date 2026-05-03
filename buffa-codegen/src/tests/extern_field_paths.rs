@@ -571,6 +571,41 @@ fn extern_field_path_on_bytes_is_build_error() {
 }
 
 #[test]
+fn extern_path_on_oneof_variant_is_silently_skipped() {
+    let mut file = proto3_file("ext_oneof.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("name".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_STRING),
+            oneof_index: Some(0),
+            // proto3_optional intentionally NOT set — this is a real oneof variant.
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("kind".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.name",
+        "crate::wrap::ShouldNotAppear",
+    )]);
+    let files = generate(&[file], &["ext_oneof.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        !content.contains("ShouldNotAppear"),
+        "extern path on a oneof variant must be silently skipped: {content}"
+    );
+}
+
+#[test]
 fn extern_field_path_on_message_is_build_error() {
     let mut file = proto3_file("ext_msg_err.proto");
     file.message_type.push(DescriptorProto {
