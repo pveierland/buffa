@@ -201,6 +201,25 @@ fn parse_config(params: &str) -> Result<PluginConfig, String> {
                         );
                     }
                 }
+                "extern_field_path" => {
+                    // value is "<proto_field_path>=<rust_path>"
+                    if let Some((proto, rust)) = value.split_once('=') {
+                        let mut proto = proto.trim().to_string();
+                        // Normalize: accept both ".my.pkg.Msg.foo" and "my.pkg.Msg.foo".
+                        if !proto.starts_with('.') {
+                            proto.insert(0, '.');
+                        }
+                        codegen.extern_field_paths.push(
+                            buffa_codegen::ExternFieldPath::new(proto, rust.trim()),
+                        );
+                    } else {
+                        eprintln!(
+                            "protoc-gen-buffa: invalid extern_field_path format '{}', \
+                             expected 'extern_field_path=.proto.field=::rust::path'",
+                            value
+                        );
+                    }
+                }
                 "mod_file" => {
                     return Err("the mod_file option was removed in 0.2; use \
                          protoc-gen-buffa-packaging instead. See CHANGELOG \
@@ -374,5 +393,36 @@ mod tests {
     fn allow_message_set_default_is_false() {
         let config = parse_config("").unwrap();
         assert!(!config.codegen.allow_message_set);
+    }
+
+    #[test]
+    fn extern_field_path_single_entry() {
+        let config = parse_config(
+            "extern_field_path=.my.pkg.Msg.foo=crate::wrap::Foo",
+        )
+        .unwrap();
+        assert_eq!(config.codegen.extern_field_paths.len(), 1);
+        let entry = &config.codegen.extern_field_paths[0];
+        assert_eq!(entry.fqn_prefix, ".my.pkg.Msg.foo");
+        assert_eq!(entry.owned_path, "crate::wrap::Foo");
+        assert!(entry.view_path.is_none());
+    }
+
+    #[test]
+    fn extern_field_path_normalizes_leading_dot() {
+        let config = parse_config(
+            "extern_field_path=my.pkg.Msg.foo=crate::wrap::Foo",
+        )
+        .unwrap();
+        assert_eq!(
+            config.codegen.extern_field_paths[0].fqn_prefix,
+            ".my.pkg.Msg.foo"
+        );
+    }
+
+    #[test]
+    fn extern_field_path_invalid_format_is_ignored() {
+        let config = parse_config("extern_field_path=no_equals").unwrap();
+        assert!(config.codegen.extern_field_paths.is_empty());
     }
 }
