@@ -1095,13 +1095,60 @@ fn classify_field(
         quote! { #vec<u8> }
     };
 
+    // Resolve any user-configured extern field type. Map fields are excluded
+    // because the lookup is consulted only inside the non-map branches below;
+    // bytes_fields takes precedence by an explicit `use_bytes` guard so a
+    // bytes-typed field that also matches an extern entry stays as bytes.
+    let extern_field = if !use_bytes {
+        ctx.lookup_extern_field_path(&field_fqn)
+    } else {
+        None
+    };
+
+    // Helper: apply the extern swap to a singular scalar element type.
+    // Only invoked from arms that already represent scalars (string and
+    // numeric); message, group, enum, and bytes paths bypass this helper.
+    // Returns a Result so a malformed user-supplied `owned_path` surfaces
+    // as a CodeGenError rather than silently falling back to the scalar.
+    let apply_extern_singular = |scalar: TokenStream| -> Result<TokenStream, CodeGenError> {
+        match extern_field {
+            Some(entry) => syn::parse_str::<syn::Type>(&entry.owned_path)
+                .map(|ty| quote! { #ty })
+                .map_err(|e| {
+                    CodeGenError::Other(format!(
+                        "invalid extern owned_path '{}' for field '{}': {}",
+                        entry.owned_path, field_fqn, e
+                    ))
+                }),
+            None => Ok(scalar),
+        }
+    };
+
     let rust_type = if let Some(entry) = map_entry {
         map_rust_type_from_entry(scope, entry, resolver)?
     } else if is_repeated {
         let elem = if field_type == Type::TYPE_BYTES {
             bytes_type.clone()
         } else {
-            scalar_or_message_type_nested(ctx, field, current_package, nesting, features, resolver)?
+            let scalar = scalar_or_message_type_nested(
+                ctx,
+                field,
+                current_package,
+                nesting,
+                features,
+                resolver,
+            )?;
+            // Only swap when the element is a true scalar — message/group/enum
+            // element types are out of scope for extern_field_paths and are
+            // rejected upstream (Tasks 9–11).
+            if matches!(
+                field_type,
+                Type::TYPE_MESSAGE | Type::TYPE_GROUP | Type::TYPE_ENUM
+            ) {
+                scalar
+            } else {
+                apply_extern_singular(scalar)?
+            }
         };
         {
             let vec = resolver.vec();
@@ -1119,7 +1166,7 @@ fn classify_field(
         } else if field_type == Type::TYPE_BYTES {
             bytes_type.clone()
         } else {
-            scalar_rust_type(field_type, resolver)?
+            apply_extern_singular(scalar_rust_type(field_type, resolver)?)?
         };
         {
             let opt = resolver.option();
@@ -1130,7 +1177,7 @@ fn classify_field(
     } else if field_type == Type::TYPE_BYTES {
         bytes_type
     } else {
-        scalar_rust_type(field_type, resolver)?
+        apply_extern_singular(scalar_rust_type(field_type, resolver)?)?
     };
 
     // Self-referential struct fields (e.g. DescriptorProto.nested_type) can

@@ -50,6 +50,7 @@ pub(super) fn joined(files: &[GeneratedFile]) -> String {
 
 mod comments;
 mod custom_attributes;
+mod extern_field_paths;
 mod generation;
 mod json_codegen;
 mod naming;
