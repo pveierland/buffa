@@ -123,6 +123,41 @@ pub enum GeneratedFileKind {
     PackageMod,
 }
 
+/// User-supplied per-field type swap. See `CodeGenConfig::extern_field_paths`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ExternFieldPath {
+    /// Fully-qualified proto field path prefix (e.g. `".my.pkg.MyMessage.my_field"`).
+    /// Matched against fields using proto-segment-aware prefix matching, mirroring
+    /// `bytes_fields` and `extern_path`.
+    pub fqn_prefix: String,
+    /// Rust path used for the owned struct field type.
+    pub owned_path: String,
+    /// Rust path used for the view struct field type. If `None`, views fall
+    /// back to the underlying scalar so they remain zero-copy. Configuring
+    /// a view path on a non-string field is a build error (validated at
+    /// `generate` time, not at construction). When `generate_views = false`,
+    /// view paths are ignored.
+    pub view_path: Option<String>,
+}
+
+impl ExternFieldPath {
+    /// Convenience constructor; `view_path` defaults to `None`.
+    pub fn new(fqn_prefix: impl Into<String>, owned_path: impl Into<String>) -> Self {
+        Self {
+            fqn_prefix: fqn_prefix.into(),
+            owned_path: owned_path.into(),
+            view_path: None,
+        }
+    }
+
+    /// Builder-style: set the view path.
+    pub fn with_view_path(mut self, view_path: impl Into<String>) -> Self {
+        self.view_path = Some(view_path.into());
+        self
+    }
+}
+
 /// Configuration for code generation.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -254,6 +289,25 @@ pub struct CodeGenConfig {
     /// `#[derive(strum::EnumIter)]` when the user does not want to apply the
     /// same attribute to every message in the matched scope.
     pub enum_attributes: Vec<(String, String)>,
+    /// Replace the emitted Rust type for matching scalar fields with a
+    /// user-supplied path.
+    ///
+    /// The owned extern type must implement `From<Inner>` and `AsRef<Inner>`,
+    /// where `Inner` is the literal scalar Rust type buffa would have emitted
+    /// (`String` for `TYPE_STRING`, `u32` for `TYPE_UINT32`/`TYPE_FIXED32`,
+    /// etc.). It must additionally implement `Default` only when the field
+    /// has proto3 implicit-presence semantics (stored bare rather than
+    /// `Option<_>`-wrapped).
+    ///
+    /// `view_path` (per entry) is meaningful only for `TYPE_STRING` fields,
+    /// where it names a borrowed counterpart implementing `From<&'a str>` and
+    /// `AsRef<str>`. Numeric scalars store their values by-value in views;
+    /// configuring a view path on a numeric field is a build error.
+    ///
+    /// Map keys/values and oneof variants are excluded from the lookup;
+    /// `bytes`-typed fields matched by `bytes_fields` take precedence over any
+    /// extern path entry.
+    pub extern_field_paths: Vec<ExternFieldPath>,
 }
 
 impl Default for CodeGenConfig {
@@ -274,6 +328,7 @@ impl Default for CodeGenConfig {
             field_attributes: Vec::new(),
             message_attributes: Vec::new(),
             enum_attributes: Vec::new(),
+            extern_field_paths: Vec::new(),
         }
     }
 }
