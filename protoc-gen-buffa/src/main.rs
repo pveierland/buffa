@@ -220,6 +220,37 @@ fn parse_config(params: &str) -> Result<PluginConfig, String> {
                         );
                     }
                 }
+                "extern_field_view_path" => {
+                    // value is "<proto_field_path>=<rust_view_path>"
+                    if let Some((proto, rust)) = value.split_once('=') {
+                        let mut proto = proto.trim().to_string();
+                        // Normalize: accept both ".my.pkg.Msg.foo" and "my.pkg.Msg.foo".
+                        if !proto.starts_with('.') {
+                            proto.insert(0, '.');
+                        }
+                        let owned = codegen
+                            .extern_field_paths
+                            .iter_mut()
+                            .find(|entry| entry.fqn_prefix == proto);
+                        match owned {
+                            Some(entry) => entry.view_path = Some(rust.trim().to_string()),
+                            None => {
+                                return Err(format!(
+                                    "extern_field_view_path={proto} has no paired \
+                                     extern_field_path entry; declare the owned path \
+                                     first"
+                                ));
+                            }
+                        }
+                    } else {
+                        eprintln!(
+                            "protoc-gen-buffa: invalid extern_field_view_path format \
+                             '{}', expected \
+                             'extern_field_view_path=.proto.field=::rust::path'",
+                            value
+                        );
+                    }
+                }
                 "mod_file" => {
                     return Err("the mod_file option was removed in 0.2; use \
                          protoc-gen-buffa-packaging instead. See CHANGELOG \
@@ -424,5 +455,34 @@ mod tests {
     fn extern_field_path_invalid_format_is_ignored() {
         let config = parse_config("extern_field_path=no_equals").unwrap();
         assert!(config.codegen.extern_field_paths.is_empty());
+    }
+
+    #[test]
+    fn extern_field_view_path_attaches_to_owned_entry() {
+        let config = parse_config(
+            "extern_field_path=.my.pkg.Msg.foo=crate::wrap::Foo,\
+             extern_field_view_path=.my.pkg.Msg.foo=crate::wrap::FooRef",
+        )
+        .unwrap();
+        assert_eq!(config.codegen.extern_field_paths.len(), 1);
+        let entry = &config.codegen.extern_field_paths[0];
+        assert_eq!(entry.view_path.as_deref(), Some("crate::wrap::FooRef"));
+    }
+
+    #[test]
+    fn extern_field_view_path_without_owned_is_error() {
+        let err = parse_config(
+            "extern_field_view_path=.my.pkg.Msg.foo=crate::wrap::FooRef",
+        )
+        .err()
+        .expect("should be an error");
+        assert!(
+            err.contains("extern_field_view_path"),
+            "error message should mention the offending key: {err}"
+        );
+        assert!(
+            err.contains(".my.pkg.Msg.foo"),
+            "error message should mention the field FQN: {err}"
+        );
     }
 }
