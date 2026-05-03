@@ -400,6 +400,8 @@ pub fn generate(
 ) -> Result<Vec<GeneratedFile>, CodeGenError> {
     let ctx = context::CodeGenContext::for_generate(file_descriptors, files_to_generate, config);
 
+    validate_extern_field_paths(&ctx, file_descriptors, files_to_generate)?;
+
     // Group requested files by package. BTreeMap → deterministic output order.
     let mut by_package: std::collections::BTreeMap<String, Vec<&FileDescriptorProto>> =
         std::collections::BTreeMap::new();
@@ -514,6 +516,103 @@ pub enum IncludeMode<'a> {
     Relative(&'a str),
     /// `include!(concat!(env!("OUT_DIR"), "/<file>"))` — for build.rs output.
     OutDir,
+}
+
+/// Validate that no `extern_field_paths` entry with a `view_path` set is
+/// matched against a non-`TYPE_STRING` field in any file being generated.
+///
+/// View paths are meaningful only for string-backed fields: the view type
+/// borrows a `&str` slice from the wire buffer and wraps it. Numeric scalars
+/// are stored by value in views, so there is no borrowed counterpart — a
+/// `view_path` on a numeric field is always a configuration mistake.
+///
+/// Only files listed in `files_to_generate` are walked; dependency files are
+/// not the caller's responsibility and are excluded.
+///
+/// # Errors
+///
+/// Returns [`CodeGenError::Other`] naming the offending field FQN and its
+/// actual wire type when a `view_path`-on-non-string mismatch is detected.
+fn validate_extern_field_paths(
+    ctx: &context::CodeGenContext,
+    file_descriptors: &[FileDescriptorProto],
+    files_to_generate: &[String],
+) -> Result<(), CodeGenError> {
+    if ctx.config.extern_field_paths.is_empty() {
+        return Ok(());
+    }
+
+    for file_name in files_to_generate {
+        let Some(file) = file_descriptors
+            .iter()
+            .find(|f| f.name.as_deref() == Some(file_name.as_str()))
+        else {
+            // FileNotFound will be caught later; skip here.
+            continue;
+        };
+        let package = file.package.as_deref().unwrap_or("");
+        walk_messages_for_extern_validation(ctx, &file.message_type, package)?;
+    }
+    Ok(())
+}
+
+fn walk_messages_for_extern_validation(
+    ctx: &context::CodeGenContext,
+    messages: &[crate::generated::descriptor::DescriptorProto],
+    scope: &str,
+) -> Result<(), CodeGenError> {
+    use crate::generated::descriptor::field_descriptor_proto::Type;
+
+    for msg in messages {
+        let msg_name = msg.name.as_deref().unwrap_or("");
+        let msg_fqn = if scope.is_empty() {
+            format!(".{msg_name}")
+        } else if scope.starts_with('.') {
+            format!("{scope}.{msg_name}")
+        } else {
+            format!(".{scope}.{msg_name}")
+        };
+
+        for field in &msg.field {
+            let field_name = field.name.as_deref().unwrap_or("");
+            let field_fqn = format!("{msg_fqn}.{field_name}");
+            let Some(entry) = ctx.lookup_extern_field_path(&field_fqn) else {
+                continue;
+            };
+            if entry.view_path.is_none() {
+                continue;
+            }
+            let wire_type = field.r#type.unwrap_or_default();
+            if wire_type != Type::TYPE_STRING {
+                return Err(CodeGenError::Other(format!(
+                    "extern_field_view_path (view_path) is set for field '{field_fqn}' but its \
+                     wire type is {wire_type:?}, not TYPE_STRING — view paths are meaningful \
+                     only for string-backed fields; numeric scalars store their value by-value \
+                     in views and have no borrowed (numeric) counterpart"
+                )));
+            }
+        }
+
+        // Recurse into nested types, skipping synthetic map-entry messages
+        // (they can't have user extern entries).
+        let nested = msg.nested_type.iter().filter(|m| {
+            m.options
+                .as_option()
+                .and_then(|o| o.map_entry)
+                != Some(true)
+        });
+        for nested_msg in nested {
+            let nested_msgs = std::slice::from_ref(nested_msg);
+            // msg_fqn already starts with '.'; strip it for the scope argument
+            // which is re-prefixed inside the recursive call.
+            walk_messages_for_extern_validation(
+                ctx,
+                nested_msgs,
+                msg_fqn.trim_start_matches('.'),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Validate one input descriptor before generating code for it.

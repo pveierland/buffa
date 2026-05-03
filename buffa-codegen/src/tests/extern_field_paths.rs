@@ -509,3 +509,35 @@ fn view_string_decode_wraps_borrow_str_with_explicit_from() {
         "view decode site must use explicit-trait From form for the view extern: {content}"
     );
 }
+
+#[test]
+fn numeric_field_with_view_path_is_build_error() {
+    let mut file = proto3_file("ext_numeric_view.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field(
+            "idx",
+            1,
+            Label::LABEL_OPTIONAL,
+            Type::TYPE_UINT32,
+        )],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![
+            ExternFieldPath::new(".Msg.idx", "crate::wrap::Idx")
+                .with_view_path("crate::wrap::IdxRef"),
+        ],
+        ..CodeGenConfig::default()
+    };
+    let err = generate(&[file], &["ext_numeric_view.proto".to_string()], &config)
+        .unwrap_err();
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("view_path") && msg.contains("numeric"),
+        "error must explain the view_path-on-numeric mismatch: {msg}"
+    );
+}
