@@ -942,3 +942,44 @@ fn owned_numeric_extern_uses_extern_numeric_shim() {
         "numeric extern skip predicate must be is_zero_u32_extern: {content}"
     );
 }
+
+/// View-side compute_size + write_to for a string-extern field with a view
+/// path must wrap the field reference through the view path's `AsRef<String>`.
+#[test]
+fn view_string_extern_encode_wraps_through_view_as_ref() {
+    let mut file = proto3_file("ext_view_encode.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("path", 1, Label::LABEL_OPTIONAL, Type::TYPE_STRING)],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![
+            ExternFieldPath::new(".Msg.path", "crate::wrap::Foo")
+                .with_view_path("crate::wrap::FooRef"),
+        ],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_view_encode.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        contains_normalized(
+            &content,
+            "::buffa::types::string_encoded_len(<crate::wrap::FooRef as \
+             ::core::convert::AsRef<str>>::as_ref(&self.path))"
+        ),
+        "view encode_size must wrap view-typed extern operand via AsRef<str>: {content}"
+    );
+    assert!(
+        contains_normalized(
+            &content,
+            "::buffa::types::encode_string(<crate::wrap::FooRef as \
+             ::core::convert::AsRef<str>>::as_ref(&self.path)"
+        ),
+        "view write_to must wrap view-typed extern operand via AsRef<str>: {content}"
+    );
+}

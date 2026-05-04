@@ -153,6 +153,7 @@ pub(crate) fn generate_view_with_nesting(
     let view_encode_methods = crate::impl_message::build_view_encode_methods(
         ctx,
         msg,
+        proto_fqn,
         ctx.config.preserve_unknown_fields,
         features,
         &oneof_idents,

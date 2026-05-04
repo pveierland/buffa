@@ -26,6 +26,58 @@ use crate::message::{find_map_entry, is_closed_enum, make_field_ident};
 use crate::CodeGenError;
 use buffa::encoding::MAX_FIELD_NUMBER;
 
+/// Which side of the codegen split is being emitted for. Selects between
+/// the owned-side wrap helpers (which match against
+/// `extern_field_paths.owned_path`) and the view-side wrap helpers (which
+/// match against `extern_field_paths.view_path`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmissionSide {
+    Owned,
+    View,
+}
+
+/// Owned/view dispatching wrapper for `wrap_extern_*_encode_ref`.
+///
+/// On the owned side this matches `extern_field_paths.owned_path` and emits
+/// `<Owned as AsRef<String>>::as_ref(...)`; on the view side it matches
+/// `view_path` and emits `<View as AsRef<str>>::as_ref(...)`. Returns the
+/// original `field_ref` unchanged when no entry / no `view_path` matches.
+fn wrap_encode_ref(
+    ctx: &crate::context::CodeGenContext,
+    side: EmissionSide,
+    fqn: &str,
+    inner_ty: &proc_macro2::TokenStream,
+    field_ref: proc_macro2::TokenStream,
+) -> Result<proc_macro2::TokenStream, crate::CodeGenError> {
+    match side {
+        EmissionSide::Owned => ctx.wrap_extern_encode_ref(fqn, inner_ty, field_ref),
+        EmissionSide::View => ctx.wrap_extern_view_encode_ref(fqn, inner_ty, field_ref),
+    }
+}
+
+/// Owned/view dispatching wrapper for `wrap_extern_*_encode_value`.
+///
+/// On the owned side this emits `*<Owned as AsRef<Inner>>::as_ref(&v)` for
+/// numeric extern fields. On the view side numeric `view_path`s are rare
+/// (validation rejects them on scalar fields today), so the view wrap is
+/// usually a no-op — the helper returns `field_value` unchanged when no
+/// entry / no `view_path` matches.
+fn wrap_encode_value(
+    ctx: &crate::context::CodeGenContext,
+    side: EmissionSide,
+    fqn: &str,
+    inner_ty: &proc_macro2::TokenStream,
+    field_value: proc_macro2::TokenStream,
+    field_ref: proc_macro2::TokenStream,
+) -> Result<proc_macro2::TokenStream, crate::CodeGenError> {
+    match side {
+        EmissionSide::Owned => ctx.wrap_extern_encode_value(fqn, inner_ty, field_value, field_ref),
+        EmissionSide::View => {
+            ctx.wrap_extern_view_encode_value(fqn, inner_ty, field_value, field_ref)
+        }
+    }
+}
+
 /// Extract and validate the field number from a descriptor, returning a `u32`.
 ///
 /// Protobuf field numbers must be in `[1, MAX_FIELD_NUMBER]`.
@@ -357,8 +409,20 @@ pub fn generate_message_impl(
     for kind in &fields {
         match kind {
             FieldKind::Scalar(f) => {
-                compute_stmts.push(scalar_compute_size_stmt(ctx, f, Some(proto_fqn), features)?);
-                write_stmts.push(scalar_write_to_stmt(ctx, f, Some(proto_fqn), features)?);
+                compute_stmts.push(scalar_compute_size_stmt(
+                    ctx,
+                    f,
+                    EmissionSide::Owned,
+                    proto_fqn,
+                    features,
+                )?);
+                write_stmts.push(scalar_write_to_stmt(
+                    ctx,
+                    f,
+                    EmissionSide::Owned,
+                    proto_fqn,
+                    features,
+                )?);
                 merge_arms.push(scalar_merge_arm(
                     ctx,
                     f,
@@ -614,6 +678,7 @@ pub fn generate_message_impl(
 pub(crate) fn build_view_encode_methods(
     ctx: &CodeGenContext,
     msg: &DescriptorProto,
+    proto_fqn: &str,
     preserve_unknown_fields: bool,
     features: &ResolvedFeatures,
     oneof_idents: &std::collections::HashMap<usize, proc_macro2::Ident>,
@@ -631,11 +696,24 @@ pub(crate) fn build_view_encode_methods(
     for kind in &fields {
         match kind {
             FieldKind::Scalar(f) => {
-                // View-side emission passes `proto_fqn = None` so the
-                // `extern_field_paths` wraps short-circuit and we keep
-                // emitting unswapped `&self.field` references.
-                compute_stmts.push(scalar_compute_size_stmt(ctx, f, None, features)?);
-                write_stmts.push(scalar_write_to_stmt(ctx, f, None, features)?);
+                // View-side emission passes `EmissionSide::View` so the
+                // scalar stmt builders dispatch to `wrap_extern_view_encode_*`,
+                // which wrap through `view_path` (when set) and otherwise
+                // return the raw `&self.field` reference unchanged.
+                compute_stmts.push(scalar_compute_size_stmt(
+                    ctx,
+                    f,
+                    EmissionSide::View,
+                    proto_fqn,
+                    features,
+                )?);
+                write_stmts.push(scalar_write_to_stmt(
+                    ctx,
+                    f,
+                    EmissionSide::View,
+                    proto_fqn,
+                    features,
+                )?);
             }
             FieldKind::Repeated(f) => {
                 compute_stmts.push(repeated_compute_size_stmt(ctx, f, None, features)?);
@@ -1046,7 +1124,8 @@ const fn tag_encoded_len(field_number: u32, wire_type: u8) -> u32 {
 fn scalar_compute_size_stmt(
     ctx: &CodeGenContext,
     field: &FieldDescriptorProto,
-    proto_fqn: Option<&str>,
+    side: EmissionSide,
+    proto_fqn: &str,
     features: &ResolvedFeatures,
 ) -> Result<TokenStream, CodeGenError> {
     let field_name = field
@@ -1061,11 +1140,11 @@ fn scalar_compute_size_stmt(
     // equals the type default (zero / empty).  All other non-optional scalars
     // use proto3-style default-value suppression.
     let is_proto2_required = is_required_field(field, features);
-    // `extern_field_paths` only applies to owned-side emission. View-side
-    // callers pass `proto_fqn = None` so the `extern_fqn`-keyed wrap helpers
-    // become no-ops and the original field reference is emitted unchanged.
-    let extern_fqn = proto_fqn.map(|p| format!(".{}.{}", p, field_name));
-    let extern_fqn = extern_fqn.as_deref();
+    // `extern_field_paths` applies to both sides. On the owned side
+    // `wrap_encode_ref/value` route through `extern.owned_path`; on the view
+    // side they route through `extern.view_path` (no-op when unset).
+    let extern_fqn = format!(".{proto_fqn}.{field_name}");
+    let extern_fqn: &str = &extern_fqn;
     let resolver = crate::imports::ImportResolver::new();
 
     // Explicit-presence field (proto3 `optional` or proto2 `optional`): encoded as
@@ -1074,10 +1153,7 @@ fn scalar_compute_size_stmt(
         return match ty {
             Type::TYPE_STRING => {
                 let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-                let v_ref = match extern_fqn {
-                    Some(fqn) => ctx.wrap_extern_encode_ref(fqn, &inner_ty, quote! { v })?,
-                    None => quote! { v },
-                };
+                let v_ref = wrap_encode_ref(ctx, side, extern_fqn, &inner_ty, quote! { v })?;
                 Ok(quote! {
                     if let Some(ref v) = self.#ident {
                         size += #tag_len + ::buffa::types::string_encoded_len(#v_ref) as u32;
@@ -1098,8 +1174,7 @@ fn scalar_compute_size_stmt(
                 // Fixed-size types (Fixed32, Float, Bool, …) use a constant;
                 // no need to bind the value, which would trigger an unused-
                 // variable warning in downstream generated code.
-                let extern_match = extern_fqn
-                    .and_then(|fqn| ctx.lookup_extern_field_path(fqn).map(|_| fqn));
+                let extern_match = ctx.lookup_extern_field_path(extern_fqn).map(|_| extern_fqn);
                 if matches!(
                     ty,
                     Type::TYPE_FIXED32
@@ -1124,7 +1199,9 @@ fn scalar_compute_size_stmt(
                     // Extern path: bind `v: &Owned` (the field is non-`Copy`)
                     // and route through the explicit-trait `AsRef` deref.
                     let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-                    let v_token = ctx.wrap_extern_encode_value(
+                    let v_token = wrap_encode_value(
+                        ctx,
+                        side,
                         fqn,
                         &inner_ty,
                         quote! { *v },
@@ -1152,12 +1229,13 @@ fn scalar_compute_size_stmt(
     match ty {
         Type::TYPE_STRING => {
             let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-            let field_ref = match extern_fqn {
-                Some(fqn) => {
-                    ctx.wrap_extern_encode_ref(fqn, &inner_ty, quote! { &self.#ident })?
-                }
-                None => quote! { &self.#ident },
-            };
+            let field_ref = wrap_encode_ref(
+                ctx,
+                side,
+                extern_fqn,
+                &inner_ty,
+                quote! { &self.#ident },
+            )?;
             return Ok(if is_proto2_required {
                 quote! { size += #tag_len + ::buffa::types::string_encoded_len(#field_ref) as u32; }
             } else {
@@ -1223,17 +1301,18 @@ fn scalar_compute_size_stmt(
     }
 
     // Numeric scalars.
-    let val = match extern_fqn {
-        Some(fqn) => {
-            let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-            ctx.wrap_extern_encode_value(
-                fqn,
-                &inner_ty,
-                quote! { self.#ident },
-                quote! { &self.#ident },
-            )?
-        }
-        None => quote! { self.#ident },
+    let val = if ctx.lookup_extern_field_path(extern_fqn).is_some() {
+        let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+        wrap_encode_value(
+            ctx,
+            side,
+            extern_fqn,
+            &inner_ty,
+            quote! { self.#ident },
+            quote! { &self.#ident },
+        )?
+    } else {
+        quote! { self.#ident }
     };
     let size_expr = type_encoded_size_expr(ty, &val);
     Ok(if is_proto2_required {
@@ -1251,7 +1330,8 @@ fn scalar_compute_size_stmt(
 fn scalar_write_to_stmt(
     ctx: &CodeGenContext,
     field: &FieldDescriptorProto,
-    proto_fqn: Option<&str>,
+    side: EmissionSide,
+    proto_fqn: &str,
     features: &ResolvedFeatures,
 ) -> Result<TokenStream, CodeGenError> {
     let field_name = field
@@ -1262,10 +1342,11 @@ fn scalar_write_to_stmt(
     let ty = effective_type(ctx, field, features);
     let ident = make_field_ident(field_name);
     let is_proto2_required = is_required_field(field, features);
-    // `extern_field_paths` is owned-only: views pass `proto_fqn = None` so
-    // every wrap helper short-circuits to the unswapped expression.
-    let extern_fqn = proto_fqn.map(|p| format!(".{}.{}", p, field_name));
-    let extern_fqn = extern_fqn.as_deref();
+    // `extern_field_paths` applies to both sides. On the owned side
+    // `wrap_encode_ref/value` route through `extern.owned_path`; on the view
+    // side they route through `extern.view_path` (no-op when unset).
+    let extern_fqn = format!(".{proto_fqn}.{field_name}");
+    let extern_fqn: &str = &extern_fqn;
     let resolver = crate::imports::ImportResolver::new();
 
     // Explicit-presence field: encoded as Option<T>; always encode when Some.
@@ -1273,10 +1354,7 @@ fn scalar_write_to_stmt(
         return match ty {
             Type::TYPE_STRING => {
                 let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-                let v_ref = match extern_fqn {
-                    Some(fqn) => ctx.wrap_extern_encode_ref(fqn, &inner_ty, quote! { v })?,
-                    None => quote! { v },
-                };
+                let v_ref = wrap_encode_ref(ctx, side, extern_fqn, &inner_ty, quote! { v })?;
                 Ok(quote! {
                     if let Some(ref v) = self.#ident {
                         ::buffa::encoding::Tag::new(
@@ -1308,13 +1386,14 @@ fn scalar_write_to_stmt(
             _ => {
                 let wire_type = wire_type_token(ty);
                 let encode_fn = encode_fn_token(ty);
-                let extern_match = extern_fqn
-                    .and_then(|fqn| ctx.lookup_extern_field_path(fqn).map(|_| fqn));
+                let extern_match = ctx.lookup_extern_field_path(extern_fqn).map(|_| extern_fqn);
                 if let Some(fqn) = extern_match {
                     // Extern path: bind `v: &Owned` (the field is non-`Copy`)
                     // and route through the explicit-trait `AsRef` deref.
                     let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-                    let v_token = ctx.wrap_extern_encode_value(
+                    let v_token = wrap_encode_value(
+                        ctx,
+                        side,
                         fqn,
                         &inner_ty,
                         quote! { *v },
@@ -1342,12 +1421,13 @@ fn scalar_write_to_stmt(
     match ty {
         Type::TYPE_STRING => {
             let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-            let field_ref = match extern_fqn {
-                Some(fqn) => {
-                    ctx.wrap_extern_encode_ref(fqn, &inner_ty, quote! { &self.#ident })?
-                }
-                None => quote! { &self.#ident },
-            };
+            let field_ref = wrap_encode_ref(
+                ctx,
+                side,
+                extern_fqn,
+                &inner_ty,
+                quote! { &self.#ident },
+            )?;
             return Ok(if is_proto2_required {
                 quote! {
                     ::buffa::encoding::Tag::new(
@@ -1449,17 +1529,18 @@ fn scalar_write_to_stmt(
     // Numeric scalars: encode by value.
     let wire_type = wire_type_token(ty);
     let encode_fn = encode_fn_token(ty);
-    let val = match extern_fqn {
-        Some(fqn) => {
-            let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-            ctx.wrap_extern_encode_value(
-                fqn,
-                &inner_ty,
-                quote! { self.#ident },
-                quote! { &self.#ident },
-            )?
-        }
-        None => quote! { self.#ident },
+    let val = if ctx.lookup_extern_field_path(extern_fqn).is_some() {
+        let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+        wrap_encode_value(
+            ctx,
+            side,
+            extern_fqn,
+            &inner_ty,
+            quote! { self.#ident },
+            quote! { &self.#ident },
+        )?
+    } else {
+        quote! { self.#ident }
     };
     Ok(if is_proto2_required {
         quote! {
