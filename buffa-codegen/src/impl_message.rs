@@ -907,6 +907,40 @@ fn scalar_clear_stmt(
         return Ok(quote! { self.#ident = #default_expr; });
     }
 
+    // Implicit-presence string/numeric scalar fields with an
+    // `extern_field_paths` entry must clear to the brand's
+    // `Default::default()`. Without this, clear() would emit
+    // `self.foo = 0u32;` (numeric) or `self.foo.clear()` (string),
+    // both of which mis-type when `self.foo` is a brand wrapper.
+    // Explicit-presence (Option<T>) fields short-circuit above; bytes
+    // is excluded by the validator; bool is not in the documented
+    // wire-type allowlist for `extern_field_paths`.
+    let field_fqn = format!(".{proto_fqn}.{field_name}");
+    if matches!(
+        ty,
+        Type::TYPE_STRING
+            | Type::TYPE_INT32
+            | Type::TYPE_SINT32
+            | Type::TYPE_SFIXED32
+            | Type::TYPE_INT64
+            | Type::TYPE_SINT64
+            | Type::TYPE_SFIXED64
+            | Type::TYPE_UINT32
+            | Type::TYPE_FIXED32
+            | Type::TYPE_UINT64
+            | Type::TYPE_FIXED64
+            | Type::TYPE_FLOAT
+            | Type::TYPE_DOUBLE
+    ) {
+        if let Some(entry) = ctx.lookup_extern_field_path(&field_fqn) {
+            let owned_ty: syn::Type = syn::parse_str(&entry.owned_path)
+                .map_err(|_| CodeGenError::InvalidTypePath(entry.owned_path.clone()))?;
+            return Ok(quote! {
+                self.#ident = <#owned_ty as ::core::default::Default>::default();
+            });
+        }
+    }
+
     match ty {
         Type::TYPE_STRING => Ok(quote! { self.#ident.clear(); }),
         Type::TYPE_BYTES => {

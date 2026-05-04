@@ -1177,3 +1177,103 @@ fn view_explicit_numeric_extern_to_owned_maps_inner() {
         "Option<Brand> numeric to_owned must map through From<Inner>: {content}"
     );
 }
+
+/// Scalar clear() for a numeric implicit-presence extern field must use
+/// the brand's Default::default(), not raw `0u32`.
+#[test]
+fn scalar_clear_numeric_extern_uses_default() {
+    let mut file = proto3_file("ext_clear_numeric.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("idx", 1, Label::LABEL_OPTIONAL, Type::TYPE_UINT32)],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.idx",
+        "crate::wrap::Idx",
+    )]);
+    let files = generate(&[file], &["ext_clear_numeric.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        contains_normalized(
+            &content,
+            "self.idx = <crate::wrap::Idx as ::core::default::Default>::default();"
+        ),
+        "scalar clear must wrap to brand Default: {content}"
+    );
+    assert!(
+        !contains_normalized(&content, "self.idx = 0u32;"),
+        "scalar clear must NOT emit raw `self.idx = 0u32;`: {content}"
+    );
+}
+
+/// Scalar clear() for a string extern field with implicit presence must use
+/// the brand's Default::default() (not `.clear()` on the inner String).
+#[test]
+fn scalar_clear_string_extern_uses_default() {
+    let mut file = proto3_file("ext_clear_string.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("path", 1, Label::LABEL_OPTIONAL, Type::TYPE_STRING)],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.path",
+        "crate::wrap::Foo",
+    )]);
+    let files = generate(&[file], &["ext_clear_string.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        contains_normalized(
+            &content,
+            "self.path = <crate::wrap::Foo as ::core::default::Default>::default();"
+        ),
+        "string scalar clear must wrap to brand Default: {content}"
+    );
+}
+
+/// View structs with at least one extern view-path field must NOT use
+/// #[derive(Default)] (because the brand's *Ref<'a> may not impl Default).
+/// Instead, an explicit `impl Default` constructs each brand-typed field
+/// via `Default::default()` on the brand.
+///
+/// As of this commit, view-side brand types are required to impl Default;
+/// this test pins the explicit-impl shape.
+#[test]
+fn view_struct_with_extern_view_path_emits_explicit_default_impl() {
+    let mut file = proto3_file("ext_view_default.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("path", 1, Label::LABEL_OPTIONAL, Type::TYPE_STRING)],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![
+            ExternFieldPath::new(".Msg.path", "crate::wrap::Foo")
+                .with_view_path("crate::wrap::FooRef"),
+        ],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_view_default.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    // Default derive replaced with explicit impl that calls
+    // <FooRef<'a> as Default>::default() on the field.
+    assert!(
+        contains_normalized(&content, "impl<'a> ::core::default::Default for MsgView<'a>"),
+        "view struct must have explicit Default impl: {content}"
+    );
+    assert!(
+        !contains_normalized(&content, "#[derive(Clone, Debug, Default)]"),
+        "view struct with extern view-path field must NOT derive Default: {content}"
+    );
+}

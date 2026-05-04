@@ -213,15 +213,104 @@ pub(crate) fn generate_view_with_nesting(
 
     let view_doc = crate::comments::doc_attrs(ctx.comment(proto_fqn));
 
+    // If any field has an extern view-path, the brand's *Ref<'a> may not
+    // impl Default, so we can't `#[derive(Default)]`. Instead, emit an
+    // explicit `impl Default` that delegates per-field — the contract for
+    // `with_view_path` requires the brand to impl Default.
+    let has_extern_view_path = msg.field.iter().any(|f| {
+        let Some(name) = f.name.as_deref() else {
+            return false;
+        };
+        let fqn = format!(".{proto_fqn}.{name}");
+        ctx.lookup_extern_field_path(&fqn)
+            .and_then(|e| e.view_path.as_deref())
+            .is_some()
+    });
+
+    let view_derives = if has_extern_view_path {
+        quote! { #[derive(Clone, Debug)] }
+    } else {
+        quote! { #[derive(Clone, Debug, Default)] }
+    };
+
+    let explicit_default_impl = if has_extern_view_path {
+        let direct_field_defaults = msg
+            .field
+            .iter()
+            .filter(|f| is_supported_field_type(f.r#type.unwrap_or_default()))
+            .filter(|f| !is_real_oneof_member(f))
+            .map(|f| -> Result<TokenStream, CodeGenError> {
+                let name = f
+                    .name
+                    .as_deref()
+                    .ok_or(CodeGenError::MissingField("field.name"))?;
+                let ident = make_field_ident(name);
+                Ok(quote! { #ident: ::core::default::Default::default(), })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let oneof_field_defaults = msg
+            .oneof_decl
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, oneof)| {
+                // Only real oneofs (not synthetic proto3-optional) are
+                // tracked in oneof_idents; synthetics have no struct field.
+                oneof_idents.get(&idx)?;
+                let oneof_name = oneof.name.as_deref()?;
+                // Match the empty-fields filter in oneof_view_struct_fields:
+                // an oneof with zero real-member fields gets no struct field.
+                let has_members = msg.field.iter().any(|f| {
+                    is_real_oneof_member(f) && f.oneof_index == Some(idx as i32)
+                });
+                if !has_members {
+                    return None;
+                }
+                let ident = make_field_ident(oneof_name);
+                Some(quote! { #ident: ::core::option::Option::None, })
+            })
+            .collect::<Vec<_>>();
+        let unknown_default = if ctx.config.preserve_unknown_fields {
+            quote! { __buffa_unknown_fields: ::core::default::Default::default(), }
+        } else {
+            quote! {}
+        };
+        let phantom_default = if !message_view_has_borrowing_field(
+            ctx,
+            msg,
+            features,
+            ctx.config.preserve_unknown_fields,
+        ) {
+            quote! { __buffa_phantom: ::core::marker::PhantomData, }
+        } else {
+            quote! {}
+        };
+        quote! {
+            impl<'a> ::core::default::Default for #view_ident<'a> {
+                fn default() -> Self {
+                    Self {
+                        #(#direct_field_defaults)*
+                        #(#oneof_field_defaults)*
+                        #unknown_default
+                        #phantom_default
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let top_level = quote! {
         #view_doc
-        #[derive(Clone, Debug, Default)]
+        #view_derives
         pub struct #view_ident<'a> {
             #(#direct_fields)*
             #(#oneof_struct_fields)*
             #unknown_fields_field
             #phantom_field
         }
+
+        #explicit_default_impl
 
         impl<'a> #view_ident<'a> {
             /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
