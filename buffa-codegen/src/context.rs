@@ -628,11 +628,11 @@ impl<'a> CodeGenContext<'a> {
         })
     }
 
-    /// View-side counterpart of [`wrap_extern_encode_ref`]: wrap a view-field
+    /// View-side counterpart of [`Self::wrap_extern_encode_ref`]: wrap a view-field
     /// reference (e.g. `&self.path` where `self.path: BrandRef<'a>`) for the
     /// string-encode/size call sites that consume `&str`.
     ///
-    /// Unlike [`wrap_extern_encode_ref`] (which uses `AsRef<String>` because
+    /// Unlike [`Self::wrap_extern_encode_ref`] (which uses `AsRef<String>` because
     /// the owned brand owns its inner `String`), the view-side wrap uses
     /// `AsRef<str>`. A borrowed view such as `BrandRef<'a>(&'a str)` cannot
     /// return `&String` — it never owns one — so the contract for the view
@@ -669,7 +669,7 @@ impl<'a> CodeGenContext<'a> {
         })
     }
 
-    /// View-side numeric counterpart of [`wrap_extern_encode_value`].
+    /// View-side numeric counterpart of [`Self::wrap_extern_encode_value`].
     ///
     /// Numeric fields without a `view_path` keep the raw scalar in the view
     /// (no Brand-typed view), so the unwrapped path is just `field_value_expr`
@@ -747,7 +747,7 @@ impl<'a> CodeGenContext<'a> {
         }
     }
 
-    /// Variant of [`wrap_extern_view_to_owned`] that returns `Ok(None)` when
+    /// Variant of [`Self::wrap_extern_view_to_owned`] that returns `Ok(None)` when
     /// no entry matches and `Ok(Some(expr))` when a swap applies. Lets
     /// callers branch on whether the wrap fired without inspecting the
     /// returned token stream.
@@ -793,6 +793,33 @@ impl<'a> CodeGenContext<'a> {
             .map_err(|_| crate::CodeGenError::InvalidTypePath(entry.owned_path.clone()))?;
         Ok(Some(quote::quote! {
             <#owned_ty as ::core::convert::From<#inner_ty>>::from(#view_expr)
+        }))
+    }
+
+    /// Sibling of [`Self::try_wrap_extern_view_numeric_to_owned`] that returns the
+    /// fully-qualified function path `<Owned as From<Inner>>::from` (no call).
+    /// Use at `.map(...)` and similar fn-pointer call sites to avoid
+    /// `clippy::redundant_closure` while preserving explicit-trait
+    /// disambiguation.
+    ///
+    /// Returns `Ok(None)` when no entry matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::CodeGenError::InvalidTypePath`] when the matched
+    /// entry's `owned_path` fails to parse as a Rust type.
+    pub fn try_extern_view_numeric_from_path(
+        &self,
+        field_fqn: &str,
+        inner_ty: &proc_macro2::TokenStream,
+    ) -> Result<Option<proc_macro2::TokenStream>, crate::CodeGenError> {
+        let Some(entry) = self.lookup_extern_field_path(field_fqn) else {
+            return Ok(None);
+        };
+        let owned_ty: syn::Type = syn::parse_str(&entry.owned_path)
+            .map_err(|_| crate::CodeGenError::InvalidTypePath(entry.owned_path.clone()))?;
+        Ok(Some(quote::quote! {
+            <#owned_ty as ::core::convert::From<#inner_ty>>::from
         }))
     }
 }

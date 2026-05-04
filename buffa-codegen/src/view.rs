@@ -1572,12 +1572,8 @@ fn singular_to_owned(
                     t,
                     &crate::imports::ImportResolver::new(),
                 )?;
-                match ctx.try_wrap_extern_view_numeric_to_owned(
-                    &field_fqn,
-                    &inner_ty,
-                    quote! { v },
-                )? {
-                    Some(inner) => quote! { self.#ident.map(|v| #inner) },
+                match ctx.try_extern_view_numeric_from_path(&field_fqn, &inner_ty)? {
+                    Some(from_path) => quote! { self.#ident.map(#from_path) },
                     None => quote! { self.#ident },
                 }
             }
@@ -1678,12 +1674,10 @@ fn repeated_to_owned(
         {
             let inner_ty =
                 crate::message::scalar_rust_type(t, &crate::imports::ImportResolver::new())?;
-            match ctx.try_wrap_extern_view_numeric_to_owned(
-                &field_fqn,
-                &inner_ty,
-                quote! { v },
-            )? {
-                Some(elem) => quote! { self.#ident.iter().copied().map(|v| #elem).collect() },
+            match ctx.try_extern_view_numeric_from_path(&field_fqn, &inner_ty)? {
+                Some(from_path) => {
+                    quote! { self.#ident.iter().copied().map(#from_path).collect() }
+                }
                 None => quote! { self.#ident.to_vec() },
             }
         }

@@ -419,10 +419,12 @@ fn view_string_field_uses_view_extern_path() {
         .expect("should generate");
     let content = joined(&files);
 
-    // View struct field should use FooRef, not &'a str.
+    // View struct field should use FooRef parameterized over the view's
+    // lifetime, not &'a str. The user-supplied view path is the bare type
+    // name; codegen attaches `<'a>` automatically.
     assert!(
-        content.contains("pub path: crate::wrap::FooRef"),
-        "view field should use the view extern path: {content}"
+        content.contains("pub path: crate::wrap::FooRef<'a>"),
+        "view field should use the view extern path with view lifetime: {content}"
     );
 }
 
@@ -1164,17 +1166,17 @@ fn view_explicit_numeric_extern_to_owned_maps_inner() {
         .expect("should generate");
     let content = joined(&files);
 
-    // prettyplease line-wraps `self.idx.map(...)` across multiple lines as
-    // `self\n .idx\n .map(...)`, which contains_normalized collapses to
-    // `self .idx .map(...)`. The normalizer doesn't strip whitespace around
-    // the dot, so we assert against the wrap-shape suffix that prettyplease
-    // never breaks.
+    // Closure-free form: `.map(<Brand as From<Inner>>::from)` — keeps the
+    // explicit-trait disambiguation while avoiding `clippy::redundant_closure`
+    // in downstream crates. prettyplease line-wraps `self.idx.map(...)` across
+    // multiple lines, but contains_normalized's whitespace handling preserves
+    // the wrap-shape suffix.
     assert!(
         contains_normalized(
             &content,
-            ".map(|v| <crate::wrap::Idx as ::core::convert::From<u32>>::from(v))"
+            ".map(<crate::wrap::Idx as ::core::convert::From<u32>>::from)"
         ),
-        "Option<Brand> numeric to_owned must map through From<Inner>: {content}"
+        "Option<Brand> numeric to_owned must map through the From<Inner> path: {content}"
     );
 }
 
@@ -1235,6 +1237,46 @@ fn scalar_clear_string_extern_uses_default() {
             "self.path = <crate::wrap::Foo as ::core::default::Default>::default();"
         ),
         "string scalar clear must wrap to brand Default: {content}"
+    );
+}
+
+/// Owned-side default-value check on an implicit-presence string-extern
+/// field must call `.is_empty()` on the brand's `AsRef<String>` projection,
+/// not on the brand wrapper itself (which doesn't impl `is_empty`).
+///
+/// prettyplease may line-wrap `<...>::as_ref(&self.path).is_empty()` across
+/// the dot, so the assertion is split: the `as_ref(&self.path)` projection
+/// must appear, and so must `.is_empty()` — together they pin the shape.
+#[test]
+fn owned_string_extern_default_check_uses_as_ref_is_empty() {
+    let mut file = proto3_file("ext_string_default_check.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("path", 1, Label::LABEL_OPTIONAL, Type::TYPE_STRING)],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.path",
+        "crate::wrap::Foo",
+    )]);
+    let files = generate(&[file], &["ext_string_default_check.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        contains_normalized(
+            &content,
+            "<crate::wrap::Foo as \
+             ::core::convert::AsRef<::buffa::alloc::string::String>>::as_ref(&self.path)"
+        ),
+        "owned string-extern default check must project through the brand's \
+         AsRef<String>: {content}"
+    );
+    assert!(
+        !contains_normalized(&content, "self.path.is_empty()"),
+        "owned string-extern default check must NOT call is_empty on the \
+         brand wrapper directly: {content}"
     );
 }
 
