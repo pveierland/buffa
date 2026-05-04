@@ -874,7 +874,12 @@ fn custom_deser_regular_field(
     field: &crate::generated::descriptor::FieldDescriptorProto,
     resolver: &crate::imports::ImportResolver,
 ) -> Result<(TokenStream, TokenStream, TokenStream), CodeGenError> {
-    let MessageScope { ctx, features, .. } = scope;
+    let MessageScope {
+        ctx,
+        proto_fqn,
+        features,
+        ..
+    } = scope;
     let field_name = field
         .name
         .as_deref()
@@ -887,10 +892,15 @@ fn custom_deser_regular_field(
     let rust_type = &info.rust_type;
 
     let field_features = crate::features::resolve_field(ctx, field, features);
+    // FQN format matches `classify_field` (`.{proto_fqn}.{field_name}`)
+    // so the same `extern_field_paths` entries match here.
+    let field_fqn = format!(".{proto_fqn}.{field_name}");
+    let is_extern = ctx.lookup_extern_field_path(&field_fqn).is_some();
     let (with_module, null_deser) = field_deser_modules(
         crate::impl_message::effective_type(ctx, field, features),
         &info,
         &field_features,
+        is_extern,
     );
 
     // Deserialization expression for the field value.
@@ -1274,7 +1284,7 @@ fn generate_field(
     let tag_line = format!("Field {field_number}: `{field_name}`");
     let doc = crate::comments::doc_attrs_with_tag(ctx.comment(&field_fqn), &tag_line);
     let serde_attr = if ctx.config.generate_json {
-        serde_field_attr(ctx, field, field_name, &info, features)
+        serde_field_attr(ctx, field, proto_fqn, field_name, &info, features)
     } else {
         quote! {}
     };
@@ -1515,19 +1525,27 @@ pub(crate) fn scalar_rust_type(
 /// non-oneof field.  Shared between `serde_field_attr` (for derive-based
 /// deserialization) and `generate_custom_deserialize` (for hand-generated
 /// Deserialize impls on messages with oneofs).
+///
+/// `is_extern`, when true, indicates the field has an `extern_field_paths`
+/// entry, so the brand-aware shim variant should be selected. The brand
+/// type itself is NOT embedded in the returned path — serde-derive's
+/// expansion infers it from the field type. Repeated and map paths stay
+/// vanilla: `extern_field_paths` entries on map fields are validator-rejected
+/// and repeated extern fields with JSON are a documented limitation.
 fn field_deser_modules(
     field_type: Type,
     info: &FieldInfo,
     features: &ResolvedFeatures,
+    is_extern: bool,
 ) -> (Option<&'static str>, Option<&'static str>) {
     let with_module = if info.is_map {
         map_serde_module(info)
     } else if info.is_repeated {
         repeated_serde_module(field_type, features)
     } else if info.is_optional {
-        optional_serde_module(field_type, features)
+        optional_serde_module(field_type, features, is_extern)
     } else {
-        singular_serde_module(field_type, features)
+        singular_serde_module(field_type, features, is_extern)
     };
 
     let null_deser = if with_module.is_none() && (info.is_repeated || info.is_map) {
@@ -1660,43 +1678,115 @@ fn repeated_serde_module(field_type: Type, features: &ResolvedFeatures) -> Optio
 }
 
 /// Serde module for explicit-presence (optional) fields.
-fn optional_serde_module(field_type: Type, features: &ResolvedFeatures) -> Option<&'static str> {
+///
+/// `is_extern`, when true, selects the brand-aware `opt_*_extern` shim so
+/// the brand stays invisible to serde — without it, the parent's derive
+/// would fall back to `<Option<Brand> as Serialize/Deserialize>` and force
+/// a `Brand: Serialize + Deserialize` bound the contract does not require.
+fn optional_serde_module(
+    field_type: Type,
+    features: &ResolvedFeatures,
+    is_extern: bool,
+) -> Option<&'static str> {
     match field_type {
-        Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => {
-            Some("::buffa::json_helpers::opt_int32")
-        }
-        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => Some("::buffa::json_helpers::opt_uint32"),
-        Type::TYPE_INT64 | Type::TYPE_SINT64 | Type::TYPE_SFIXED64 => {
-            Some("::buffa::json_helpers::opt_int64")
-        }
-        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => Some("::buffa::json_helpers::opt_uint64"),
-        Type::TYPE_FLOAT => Some("::buffa::json_helpers::opt_float"),
-        Type::TYPE_DOUBLE => Some("::buffa::json_helpers::opt_double"),
+        Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => Some(if is_extern {
+            "::buffa::json_helpers::opt_int32_extern"
+        } else {
+            "::buffa::json_helpers::opt_int32"
+        }),
+        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => Some(if is_extern {
+            "::buffa::json_helpers::opt_uint32_extern"
+        } else {
+            "::buffa::json_helpers::opt_uint32"
+        }),
+        Type::TYPE_INT64 | Type::TYPE_SINT64 | Type::TYPE_SFIXED64 => Some(if is_extern {
+            "::buffa::json_helpers::opt_int64_extern"
+        } else {
+            "::buffa::json_helpers::opt_int64"
+        }),
+        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => Some(if is_extern {
+            "::buffa::json_helpers::opt_uint64_extern"
+        } else {
+            "::buffa::json_helpers::opt_uint64"
+        }),
+        Type::TYPE_FLOAT => Some(if is_extern {
+            "::buffa::json_helpers::opt_float_extern"
+        } else {
+            "::buffa::json_helpers::opt_float"
+        }),
+        Type::TYPE_DOUBLE => Some(if is_extern {
+            "::buffa::json_helpers::opt_double_extern"
+        } else {
+            "::buffa::json_helpers::opt_double"
+        }),
         Type::TYPE_BYTES => Some("::buffa::json_helpers::opt_bytes"),
         Type::TYPE_ENUM => Some(if is_closed_enum(features) {
             "::buffa::json_helpers::opt_closed_enum"
         } else {
             "::buffa::json_helpers::opt_enum"
         }),
+        // Explicit-presence string: extern fields go through the brand-aware
+        // shim so the brand stays invisible to serde (no Serialize /
+        // Deserialize impls required). Non-extern stays on serde derive's
+        // native `Option<String>: Serialize/Deserialize`.
+        Type::TYPE_STRING => {
+            if is_extern {
+                Some("::buffa::json_helpers::opt_string_extern")
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
 
 /// Serde module for singular (non-optional, non-repeated) fields.
-fn singular_serde_module(field_type: Type, features: &ResolvedFeatures) -> Option<&'static str> {
+///
+/// `is_extern`, when true, selects the brand-aware `*_extern` shim so the
+/// brand type stays invisible to serde. BYTES, BOOL, and ENUM stay vanilla
+/// (extern_field_paths is validator-rejected on these).
+fn singular_serde_module(
+    field_type: Type,
+    features: &ResolvedFeatures,
+    is_extern: bool,
+) -> Option<&'static str> {
     match field_type {
         Type::TYPE_BOOL => Some("::buffa::json_helpers::proto_bool"),
-        Type::TYPE_STRING => Some("::buffa::json_helpers::proto_string"),
-        Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => {
-            Some("::buffa::json_helpers::int32")
-        }
-        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => Some("::buffa::json_helpers::uint32"),
-        Type::TYPE_INT64 | Type::TYPE_SINT64 | Type::TYPE_SFIXED64 => {
-            Some("::buffa::json_helpers::int64")
-        }
-        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => Some("::buffa::json_helpers::uint64"),
-        Type::TYPE_FLOAT => Some("::buffa::json_helpers::float"),
-        Type::TYPE_DOUBLE => Some("::buffa::json_helpers::double"),
+        Type::TYPE_STRING => Some(if is_extern {
+            "::buffa::json_helpers::proto_string_extern"
+        } else {
+            "::buffa::json_helpers::proto_string"
+        }),
+        Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => Some(if is_extern {
+            "::buffa::json_helpers::int32_extern"
+        } else {
+            "::buffa::json_helpers::int32"
+        }),
+        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => Some(if is_extern {
+            "::buffa::json_helpers::uint32_extern"
+        } else {
+            "::buffa::json_helpers::uint32"
+        }),
+        Type::TYPE_INT64 | Type::TYPE_SINT64 | Type::TYPE_SFIXED64 => Some(if is_extern {
+            "::buffa::json_helpers::int64_extern"
+        } else {
+            "::buffa::json_helpers::int64"
+        }),
+        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => Some(if is_extern {
+            "::buffa::json_helpers::uint64_extern"
+        } else {
+            "::buffa::json_helpers::uint64"
+        }),
+        Type::TYPE_FLOAT => Some(if is_extern {
+            "::buffa::json_helpers::float_extern"
+        } else {
+            "::buffa::json_helpers::float"
+        }),
+        Type::TYPE_DOUBLE => Some(if is_extern {
+            "::buffa::json_helpers::double_extern"
+        } else {
+            "::buffa::json_helpers::double"
+        }),
         Type::TYPE_BYTES => Some("::buffa::json_helpers::bytes"),
         Type::TYPE_ENUM => Some(if is_closed_enum(features) {
             "::buffa::json_helpers::closed_enum"
@@ -1708,10 +1798,17 @@ fn singular_serde_module(field_type: Type, features: &ResolvedFeatures) -> Optio
 }
 
 /// Determine the `skip_serializing_if` predicate for a field.
+///
+/// `is_extern`, when true, selects the brand-aware `*_extern` predicate
+/// variant so the predicate operates on the externalized brand type.
+/// Repeated, map, and optional wrappers stay vanilla — extern entries on
+/// map fields are validator-rejected and the wrapper checks operate on
+/// the wrapper, not the inner value.
 fn skip_serializing_predicate(
     field_type: Type,
     info: &FieldInfo,
     features: &ResolvedFeatures,
+    is_extern: bool,
 ) -> Option<&'static str> {
     if info.is_required {
         // Proto2 required fields must always be present in JSON, even at
@@ -1725,12 +1822,20 @@ fn skip_serializing_predicate(
     } else if info.is_optional {
         Some("::core::option::Option::is_none")
     } else {
-        singular_skip_predicate(field_type, features)
+        singular_skip_predicate(field_type, features, is_extern)
     }
 }
 
 /// Determine the `skip_serializing_if` predicate for a singular field.
-fn singular_skip_predicate(field_type: Type, features: &ResolvedFeatures) -> Option<&'static str> {
+///
+/// `is_extern`, when true, selects the brand-aware `*_extern` predicate
+/// variant for STRING and numeric types. ENUM, BOOL, BYTES, MESSAGE, and
+/// GROUP stay vanilla (extern_field_paths is validator-rejected on these).
+fn singular_skip_predicate(
+    field_type: Type,
+    features: &ResolvedFeatures,
+    is_extern: bool,
+) -> Option<&'static str> {
     match field_type {
         Type::TYPE_MESSAGE | Type::TYPE_GROUP => {
             Some("::buffa::json_helpers::skip_if::is_unset_message_field")
@@ -1740,22 +1845,42 @@ fn singular_skip_predicate(field_type: Type, features: &ResolvedFeatures) -> Opt
         } else {
             "::buffa::json_helpers::skip_if::is_default_enum_value"
         }),
-        Type::TYPE_INT64 | Type::TYPE_SINT64 | Type::TYPE_SFIXED64 => {
-            Some("::buffa::json_helpers::skip_if::is_zero_i64")
-        }
-        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => {
-            Some("::buffa::json_helpers::skip_if::is_zero_u64")
-        }
-        Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => {
-            Some("::buffa::json_helpers::skip_if::is_zero_i32")
-        }
-        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => {
-            Some("::buffa::json_helpers::skip_if::is_zero_u32")
-        }
+        Type::TYPE_INT64 | Type::TYPE_SINT64 | Type::TYPE_SFIXED64 => Some(if is_extern {
+            "::buffa::json_helpers::skip_if::is_zero_i64_extern"
+        } else {
+            "::buffa::json_helpers::skip_if::is_zero_i64"
+        }),
+        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => Some(if is_extern {
+            "::buffa::json_helpers::skip_if::is_zero_u64_extern"
+        } else {
+            "::buffa::json_helpers::skip_if::is_zero_u64"
+        }),
+        Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => Some(if is_extern {
+            "::buffa::json_helpers::skip_if::is_zero_i32_extern"
+        } else {
+            "::buffa::json_helpers::skip_if::is_zero_i32"
+        }),
+        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => Some(if is_extern {
+            "::buffa::json_helpers::skip_if::is_zero_u32_extern"
+        } else {
+            "::buffa::json_helpers::skip_if::is_zero_u32"
+        }),
         Type::TYPE_BOOL => Some("::buffa::json_helpers::skip_if::is_false"),
-        Type::TYPE_FLOAT => Some("::buffa::json_helpers::skip_if::is_zero_f32"),
-        Type::TYPE_DOUBLE => Some("::buffa::json_helpers::skip_if::is_zero_f64"),
-        Type::TYPE_STRING => Some("::buffa::json_helpers::skip_if::is_empty_str"),
+        Type::TYPE_FLOAT => Some(if is_extern {
+            "::buffa::json_helpers::skip_if::is_zero_f32_extern"
+        } else {
+            "::buffa::json_helpers::skip_if::is_zero_f32"
+        }),
+        Type::TYPE_DOUBLE => Some(if is_extern {
+            "::buffa::json_helpers::skip_if::is_zero_f64_extern"
+        } else {
+            "::buffa::json_helpers::skip_if::is_zero_f64"
+        }),
+        Type::TYPE_STRING => Some(if is_extern {
+            "::buffa::json_helpers::skip_if::is_empty_str_extern"
+        } else {
+            "::buffa::json_helpers::skip_if::is_empty_str"
+        }),
         Type::TYPE_BYTES => Some("::buffa::json_helpers::skip_if::is_empty_bytes"),
     }
 }
@@ -1771,6 +1896,7 @@ fn singular_skip_predicate(field_type: Type, features: &ResolvedFeatures) -> Opt
 fn serde_field_attr(
     ctx: &CodeGenContext,
     field: &crate::generated::descriptor::FieldDescriptorProto,
+    proto_fqn: &str,
     field_name: &str,
     info: &FieldInfo,
     features: &ResolvedFeatures,
@@ -1778,9 +1904,16 @@ fn serde_field_attr(
     let field_type = crate::impl_message::effective_type(ctx, field, features);
     let field_features = crate::features::resolve_field(ctx, field, features);
     let json_name = field.json_name.as_deref().unwrap_or(field_name);
-    let (with_module, null_deser) = field_deser_modules(field_type, info, &field_features);
 
-    let skip_if = skip_serializing_predicate(field_type, info, &field_features);
+    // FQN format matches `classify_field` (`.{proto_fqn}.{field_name}`)
+    // so the same `extern_field_paths` entries match here.
+    let field_fqn = format!(".{proto_fqn}.{field_name}");
+    let is_extern = ctx.lookup_extern_field_path(&field_fqn).is_some();
+
+    let (with_module, null_deser) =
+        field_deser_modules(field_type, info, &field_features, is_extern);
+
+    let skip_if = skip_serializing_predicate(field_type, info, &field_features, is_extern);
 
     // Proto3 JSON spec: parsers must accept both the camelCase json_name
     // and the original proto field name.  Emit `alias` when they differ.
