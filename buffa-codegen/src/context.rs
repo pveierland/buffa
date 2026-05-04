@@ -627,6 +627,169 @@ impl<'a> CodeGenContext<'a> {
             <#view_ty as ::core::convert::From<#borrowed_inner_ty>>::from(#decoded_expr)
         })
     }
+
+    /// View-side counterpart of [`wrap_extern_encode_ref`]: wrap a view-field
+    /// reference (e.g. `&self.path` where `self.path: BrandRef<'a>`) for the
+    /// string-encode/size call sites that consume `&str`.
+    ///
+    /// Unlike [`wrap_extern_encode_ref`] (which uses `AsRef<String>` because
+    /// the owned brand owns its inner `String`), the view-side wrap uses
+    /// `AsRef<str>`. A borrowed view such as `BrandRef<'a>(&'a str)` cannot
+    /// return `&String` — it never owns one — so the contract for the view
+    /// brand is `AsRef<str>`. The downstream callers feed the `&str` result
+    /// into `string_encoded_len(&str)` / `encode_string(&str, _)`, both of
+    /// which take `&str`.
+    ///
+    /// Returns the original expression untouched when no swap with a
+    /// `view_path` applies. `inner_ty` is unused for the wrap shape itself
+    /// (the `AsRef<str>` target is fixed) but kept in the signature for
+    /// symmetry with the owned-side helper and for future numeric-view
+    /// extensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::CodeGenError::InvalidTypePath`] when the matched
+    /// entry's `view_path` fails to parse as a Rust type.
+    pub fn wrap_extern_view_encode_ref(
+        &self,
+        field_fqn: &str,
+        _inner_ty: &proc_macro2::TokenStream,
+        field_ref_expr: proc_macro2::TokenStream,
+    ) -> Result<proc_macro2::TokenStream, crate::CodeGenError> {
+        let Some(entry) = self.lookup_extern_field_path(field_fqn) else {
+            return Ok(field_ref_expr);
+        };
+        let Some(view_path) = entry.view_path.as_deref() else {
+            return Ok(field_ref_expr);
+        };
+        let view_ty: syn::Type = syn::parse_str(view_path)
+            .map_err(|_| crate::CodeGenError::InvalidTypePath(view_path.to_string()))?;
+        Ok(quote::quote! {
+            <#view_ty as ::core::convert::AsRef<str>>::as_ref(#field_ref_expr)
+        })
+    }
+
+    /// View-side numeric counterpart of [`wrap_extern_encode_value`].
+    ///
+    /// Numeric fields without a `view_path` keep the raw scalar in the view
+    /// (no Brand-typed view), so the unwrapped path is just `field_value_expr`
+    /// — this helper returns it unchanged in that case.
+    ///
+    /// When `view_path` is set (rare — `with_view_path` on a numeric is
+    /// rejected at validation time), emits the same explicit-trait deref form
+    /// as the owned-side helper.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::CodeGenError::InvalidTypePath`] when the matched
+    /// entry's `view_path` fails to parse as a Rust type.
+    pub fn wrap_extern_view_encode_value(
+        &self,
+        field_fqn: &str,
+        inner_ty: &proc_macro2::TokenStream,
+        field_value_expr: proc_macro2::TokenStream,
+        field_ref_expr: proc_macro2::TokenStream,
+    ) -> Result<proc_macro2::TokenStream, crate::CodeGenError> {
+        let Some(entry) = self.lookup_extern_field_path(field_fqn) else {
+            return Ok(field_value_expr);
+        };
+        let Some(view_path) = entry.view_path.as_deref() else {
+            return Ok(field_value_expr);
+        };
+        let view_ty: syn::Type = syn::parse_str(view_path)
+            .map_err(|_| crate::CodeGenError::InvalidTypePath(view_path.to_string()))?;
+        Ok(quote::quote! {
+            *<#view_ty as ::core::convert::AsRef<#inner_ty>>::as_ref(#field_ref_expr)
+        })
+    }
+
+    /// View → owned conversion for an extern-typed string field.
+    ///
+    /// Emits `<Owned as ::core::convert::From<&View>>::from(&view_expr)`
+    /// when the entry has a `view_path`, or `<Owned as ::core::convert::From<&str>>::from(view_expr)`
+    /// when it doesn't. Returns the original `view_expr` unchanged when no
+    /// entry matches.
+    ///
+    /// When using `with_view_path`, brand authors must impl `From<&BrandRef>`
+    /// on the owned brand. Without `with_view_path`, brand authors must impl
+    /// `From<&str>` on the owned brand. (Both required only when views are
+    /// enabled; the contract is documented on `CodeGenConfig::extern_field_paths`.)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::CodeGenError::InvalidTypePath`] when either path fails to parse.
+    pub fn wrap_extern_view_to_owned(
+        &self,
+        field_fqn: &str,
+        view_expr: proc_macro2::TokenStream,
+    ) -> Result<proc_macro2::TokenStream, crate::CodeGenError> {
+        let Some(entry) = self.lookup_extern_field_path(field_fqn) else {
+            return Ok(view_expr);
+        };
+        let owned_ty: syn::Type = syn::parse_str(&entry.owned_path)
+            .map_err(|_| crate::CodeGenError::InvalidTypePath(entry.owned_path.clone()))?;
+        match entry.view_path.as_deref() {
+            Some(view_path) => {
+                let view_ty: syn::Type = syn::parse_str(view_path)
+                    .map_err(|_| crate::CodeGenError::InvalidTypePath(view_path.to_string()))?;
+                Ok(quote::quote! {
+                    <#owned_ty as ::core::convert::From<&#view_ty>>::from(&#view_expr)
+                })
+            }
+            None => Ok(quote::quote! {
+                <#owned_ty as ::core::convert::From<&str>>::from(#view_expr)
+            }),
+        }
+    }
+
+    /// Variant of [`wrap_extern_view_to_owned`] that returns `Ok(None)` when
+    /// no entry matches and `Ok(Some(expr))` when a swap applies. Lets
+    /// callers branch on whether the wrap fired without inspecting the
+    /// returned token stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::CodeGenError::InvalidTypePath`] when either path fails to parse.
+    pub fn try_wrap_extern_view_to_owned(
+        &self,
+        field_fqn: &str,
+        view_expr: proc_macro2::TokenStream,
+    ) -> Result<Option<proc_macro2::TokenStream>, crate::CodeGenError> {
+        if self.lookup_extern_field_path(field_fqn).is_none() {
+            return Ok(None);
+        }
+        Ok(Some(self.wrap_extern_view_to_owned(field_fqn, view_expr)?))
+    }
+
+    /// View → owned conversion for an extern-typed numeric field. Numeric
+    /// extern fields don't carry a `view_path` (validation rejects it), so
+    /// the view side has the raw scalar; the owned side has the brand.
+    /// Conversion is `<Owned as From<Inner>>::from(view_expr)`.
+    ///
+    /// `inner_ty` is the bare Rust scalar (e.g. `u32`).
+    ///
+    /// Returns `Ok(None)` when no entry matches; `Ok(Some(expr))` when the
+    /// wrap fires.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::CodeGenError::InvalidTypePath`] when the matched
+    /// entry's `owned_path` fails to parse as a Rust type.
+    pub fn try_wrap_extern_view_numeric_to_owned(
+        &self,
+        field_fqn: &str,
+        inner_ty: &proc_macro2::TokenStream,
+        view_expr: proc_macro2::TokenStream,
+    ) -> Result<Option<proc_macro2::TokenStream>, crate::CodeGenError> {
+        let Some(entry) = self.lookup_extern_field_path(field_fqn) else {
+            return Ok(None);
+        };
+        let owned_ty: syn::Type = syn::parse_str(&entry.owned_path)
+            .map_err(|_| crate::CodeGenError::InvalidTypePath(entry.owned_path.clone()))?;
+        Ok(Some(quote::quote! {
+            <#owned_ty as ::core::convert::From<#inner_ty>>::from(#view_expr)
+        }))
+    }
 }
 
 /// Scope-local context for code generation within a message.
