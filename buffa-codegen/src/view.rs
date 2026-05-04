@@ -524,7 +524,11 @@ fn view_singular_type(
                 if let Some(path) = extern_view {
                     let view_ty: syn::Type = syn::parse_str(path)
                         .map_err(|_| CodeGenError::InvalidTypePath(path.to_string()))?;
-                    quote! { ::core::option::Option<#view_ty> }
+                    // The view brand carries the view lifetime per the
+                    // contract on `CodeGenConfig::extern_field_paths`
+                    // (`From<&'a str>`); the user supplies the bare path
+                    // without `<'a>`, so we attach it here.
+                    quote! { ::core::option::Option<#view_ty<'a>> }
                 } else {
                     quote! { ::core::option::Option<&'a str> }
                 }
@@ -550,7 +554,8 @@ fn view_singular_type(
             if let Some(path) = extern_view {
                 let view_ty: syn::Type = syn::parse_str(path)
                     .map_err(|_| CodeGenError::InvalidTypePath(path.to_string()))?;
-                Ok(quote! { #view_ty })
+                // See note above: attach the view lifetime to the brand path.
+                Ok(quote! { #view_ty<'a> })
             } else {
                 Ok(quote! { &'a str })
             }
@@ -599,7 +604,8 @@ fn view_repeated_type(
             if let Some(path) = extern_view {
                 let view_ty: syn::Type = syn::parse_str(path)
                     .map_err(|_| CodeGenError::InvalidTypePath(path.to_string()))?;
-                Ok(quote! { ::buffa::RepeatedView<'a, #view_ty> })
+                // See note above: attach the view lifetime to the brand path.
+                Ok(quote! { ::buffa::RepeatedView<'a, #view_ty<'a>> })
             } else {
                 Ok(quote! { ::buffa::RepeatedView<'a, &'a str> })
             }

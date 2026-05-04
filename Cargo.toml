@@ -9,6 +9,11 @@ members = [
     "buffa-test",
     "protoc-gen-buffa",
     "protoc-gen-buffa-packaging",
+    "buffa-codegen/tests/fixtures/extern_field_paths/brand",
+    "buffa-codegen/tests/fixtures/extern_field_paths/corner_a",
+    "buffa-codegen/tests/fixtures/extern_field_paths/corner_b",
+    "buffa-codegen/tests/fixtures/extern_field_paths/corner_c",
+    "buffa-codegen/tests/fixtures/extern_field_paths/corner_d",
 ]
 exclude = [
     "benchmarks/gen-datasets",

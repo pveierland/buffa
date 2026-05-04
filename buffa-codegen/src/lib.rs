@@ -56,6 +56,11 @@ pub const ALLOW_LINTS: &[&str] = &[
     // A user `message View { message Inner }` produces
     // `__buffa::view::view::InnerView`; harmless but trips this lint.
     "clippy::module_inception",
+    // `extern_field_paths` numeric view→owned emits
+    // `.map(|v| <Brand as From<u32>>::from(v))`. The closure form is
+    // necessary so the explicit-trait `From` form survives — replacing it
+    // with a bare path would lose that disambiguation.
+    "clippy::redundant_closure",
 ];
 
 /// Render [`ALLOW_LINTS`] as a `#[allow(…)]` attribute token stream.

@@ -1294,11 +1294,28 @@ fn scalar_compute_size_stmt(
                 &inner_ty,
                 quote! { &self.#ident },
             )?;
+            // The `is_empty()` operand must route through the brand wrap when
+            // an `extern_field_paths` entry applies, so it calls
+            // `String::is_empty` / `str::is_empty` on the inner value rather
+            // than on the brand (which doesn't impl `is_empty`). When no
+            // extern entry applies we keep the prior `self.#ident.is_empty()`
+            // form to preserve the byte-identical baseline emit.
+            let is_empty_operand = if ctx.lookup_extern_field_path(extern_fqn).is_some() {
+                wrap_encode_ref(
+                    ctx,
+                    side,
+                    extern_fqn,
+                    &inner_ty,
+                    quote! { &self.#ident },
+                )?
+            } else {
+                quote! { self.#ident }
+            };
             return Ok(if is_proto2_required {
                 quote! { size += #tag_len + ::buffa::types::string_encoded_len(#field_ref) as u32; }
             } else {
                 quote! {
-                    if !self.#ident.is_empty() {
+                    if !#is_empty_operand.is_empty() {
                         size += #tag_len + ::buffa::types::string_encoded_len(#field_ref) as u32;
                     }
                 }
@@ -1486,6 +1503,21 @@ fn scalar_write_to_stmt(
                 &inner_ty,
                 quote! { &self.#ident },
             )?;
+            // Brand-aware operand for the implicit-presence default check;
+            // see the matching note in `scalar_compute_size_stmt`. Skip the
+            // wrap when no extern entry applies so the baseline emit stays
+            // byte-identical.
+            let is_empty_operand = if ctx.lookup_extern_field_path(extern_fqn).is_some() {
+                wrap_encode_ref(
+                    ctx,
+                    side,
+                    extern_fqn,
+                    &inner_ty,
+                    quote! { &self.#ident },
+                )?
+            } else {
+                quote! { self.#ident }
+            };
             return Ok(if is_proto2_required {
                 quote! {
                     ::buffa::encoding::Tag::new(
@@ -1496,7 +1528,7 @@ fn scalar_write_to_stmt(
                 }
             } else {
                 quote! {
-                    if !self.#ident.is_empty() {
+                    if !#is_empty_operand.is_empty() {
                         ::buffa::encoding::Tag::new(
                             #field_number,
                             ::buffa::encoding::WireType::LengthDelimited,

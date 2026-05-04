@@ -1,0 +1,14 @@
+[package]
+name = "ext_corner_d"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+buffa = { path = "../../../../../buffa", features = ["json"] }
+extern_brand = { path = "../brand" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[build-dependencies]
+buffa-build = { path = "../../../../../buffa-build" }

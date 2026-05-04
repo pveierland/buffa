@@ -1,0 +1,12 @@
+[package]
+name = "ext_corner_b"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+buffa = { path = "../../../../../buffa" }
+extern_brand = { path = "../brand" }
+
+[build-dependencies]
+buffa-build = { path = "../../../../../buffa-build" }

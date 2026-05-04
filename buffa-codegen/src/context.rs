@@ -732,8 +732,13 @@ impl<'a> CodeGenContext<'a> {
             Some(view_path) => {
                 let view_ty: syn::Type = syn::parse_str(view_path)
                     .map_err(|_| crate::CodeGenError::InvalidTypePath(view_path.to_string()))?;
+                // The user-supplied view path omits the view lifetime per
+                // contract. Use `<'_>` here so the `From` argument type
+                // names the concrete brand instantiation; Rust's lifetime
+                // elision fills in the underlying lifetime from the call
+                // expression `&#view_expr`.
                 Ok(quote::quote! {
-                    <#owned_ty as ::core::convert::From<&#view_ty>>::from(&#view_expr)
+                    <#owned_ty as ::core::convert::From<&#view_ty<'_>>>::from(&#view_expr)
                 })
             }
             None => Ok(quote::quote! {

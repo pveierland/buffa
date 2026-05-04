@@ -302,6 +302,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "ext_corner_a"
+version = "0.0.0"
+dependencies = [
+ "buffa",
+ "buffa-build",
+ "extern_brand",
+]
+
+[[package]]
+name = "ext_corner_b"
+version = "0.0.0"
+dependencies = [
+ "buffa",
+ "buffa-build",
+ "extern_brand",
+]
+
+[[package]]
+name = "ext_corner_c"
+version = "0.0.0"
+dependencies = [
+ "buffa",
+ "buffa-build",
+ "extern_brand",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ext_corner_d"
+version = "0.0.0"
+dependencies = [
+ "buffa",
+ "buffa-build",
+ "extern_brand",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "extern_brand"
+version = "0.0.0"
+
+[[package]]
 name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

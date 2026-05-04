@@ -15,7 +15,8 @@ include!("google.protobuf.wrappers.rs");
     clippy::match_single_binding,
     clippy::uninlined_format_args,
     clippy::doc_lazy_continuation,
-    clippy::module_inception
+    clippy::module_inception,
+    clippy::redundant_closure
 )]
 pub mod __buffa {
     #[allow(unused_imports)]

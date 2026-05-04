@@ -1054,7 +1054,7 @@ fn view_string_extern_to_owned_with_view_path_routes_through_from_view() {
     assert!(
         contains_normalized(
             &content,
-            "<crate::wrap::Foo as ::core::convert::From<&crate::wrap::FooRef>>::from(&self.path)"
+            "<crate::wrap::Foo as ::core::convert::From<&crate::wrap::FooRef<'_>>>::from(&self.path)"
         ),
         "view-to-owned must route extern string through From<&View>: {content}"
     );

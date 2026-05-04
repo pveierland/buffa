@@ -1,0 +1,9 @@
+syntax = "proto3";
+package example;
+
+message Msg {
+    string path = 1;     // implicit-presence string — exercises Foo + clear()
+    uint32 idx = 2;      // implicit-presence numeric — exercises Idx + clear()
+    optional string opt_path = 3;  // explicit-presence string — exercises Option<Foo>
+    optional uint32 opt_idx = 4;   // explicit-presence numeric — exercises Option<Idx>
+}
