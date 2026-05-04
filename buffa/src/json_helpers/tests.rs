@@ -1463,3 +1463,124 @@ fn double_deserialize_table() {
     let h: SerdeDouble = serde_json::from_str(r#""NaN""#).unwrap();
     assert!(h.0.is_nan());
 }
+
+#[cfg(test)]
+mod proto_string_extern_round_trip {
+    use alloc::string::String;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, PartialEq, Clone)]
+    struct Brand(String);
+
+    impl ::core::convert::From<String> for Brand {
+        fn from(s: String) -> Self {
+            Self(s)
+        }
+    }
+
+    impl ::core::convert::AsRef<String> for Brand {
+        fn as_ref(&self) -> &String {
+            &self.0
+        }
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Wrapper {
+        #[serde(with = "crate::json_helpers::proto_string_extern")]
+        #[serde(skip_serializing_if = "crate::json_helpers::skip_if::is_empty_str_extern")]
+        path: Brand,
+    }
+
+    #[test]
+    fn brand_round_trips_through_proto_string_extern() {
+        let w = Wrapper {
+            path: Brand(String::from("hello")),
+        };
+        let json = serde_json::to_string(&w).expect("serialize");
+        assert_eq!(json, r#"{"path":"hello"}"#);
+        let back: Wrapper = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn empty_brand_skipped_by_is_empty_str_extern() {
+        let w = Wrapper {
+            path: Brand(String::new()),
+        };
+        let json = serde_json::to_string(&w).expect("serialize");
+        assert_eq!(json, r#"{}"#);
+    }
+
+    #[test]
+    fn brand_deserializes_from_null_via_proto_string_visitor() {
+        // proto_string accepts JSON null as the empty string; the extern
+        // variant inherits this via super::proto_string delegation.
+        let w: Wrapper = serde_json::from_str(r#"{"path":null}"#).expect("deserialize");
+        assert_eq!(w.path, Brand(String::new()));
+    }
+}
+
+#[cfg(test)]
+mod opt_string_extern_round_trip {
+    use alloc::string::String;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, PartialEq, Clone)]
+    struct Brand(String);
+
+    impl ::core::convert::From<String> for Brand {
+        fn from(s: String) -> Self {
+            Self(s)
+        }
+    }
+
+    impl ::core::convert::AsRef<String> for Brand {
+        fn as_ref(&self) -> &String {
+            &self.0
+        }
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Wrapper {
+        #[serde(with = "crate::json_helpers::opt_string_extern")]
+        #[serde(skip_serializing_if = "::core::option::Option::is_none")]
+        #[serde(default)]
+        opt_path: ::core::option::Option<Brand>,
+    }
+
+    #[test]
+    fn some_brand_round_trips() {
+        let w = Wrapper {
+            opt_path: Some(Brand(String::from("hello"))),
+        };
+        let json = serde_json::to_string(&w).expect("serialize");
+        assert_eq!(json, r#"{"opt_path":"hello"}"#);
+        let back: Wrapper = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn none_round_trips_through_skip_and_default() {
+        let w = Wrapper { opt_path: None };
+        let json = serde_json::to_string(&w).expect("serialize");
+        assert_eq!(json, r#"{}"#);
+        let back: Wrapper = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn json_null_deserializes_to_none() {
+        // Critical contract: opt_string_extern must distinguish JSON null
+        // (Option = None) from JSON "" (Option = Some(Brand(""))). This
+        // matches the existing opt_int32 / opt_uint32 / ... family.
+        let w: Wrapper = serde_json::from_str(r#"{"opt_path":null}"#).expect("deserialize");
+        assert_eq!(w.opt_path, None);
+    }
+
+    #[test]
+    fn json_empty_string_deserializes_to_some_empty() {
+        let w: Wrapper =
+            serde_json::from_str(r#"{"opt_path":""}"#).expect("deserialize");
+        assert_eq!(w.opt_path, Some(Brand(String::new())));
+    }
+}

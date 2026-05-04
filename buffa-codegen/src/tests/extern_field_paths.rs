@@ -824,3 +824,88 @@ fn text_format_string_extern_wraps_encode_and_decode() {
         "text decode must wrap string extern with From<String>: {content}"
     );
 }
+
+/// Owned-side serde JSON for a string-extern field must route through the
+/// brand-aware module path. The `with =` attribute carries only the module
+/// path — the brand type is inferred from the field type at the call site.
+#[test]
+fn owned_string_extern_uses_brand_aware_serde_module() {
+    let mut file = proto3_file("ext_serde_string.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("path", 1, Label::LABEL_OPTIONAL, Type::TYPE_STRING)],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: false,
+        generate_json: true,
+        extern_field_paths: vec![ExternFieldPath::new(".Msg.path", "crate::wrap::Foo")],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_serde_string.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        content.contains(r#"with = "::buffa::json_helpers::proto_string_extern""#),
+        "extern serde shim path must point at the extern module: {content}"
+    );
+    assert!(
+        !content.contains(r#"with = "::buffa::json_helpers::proto_string""#),
+        "raw proto_string shim must not appear on the extern field: {content}"
+    );
+    assert!(
+        content.contains(
+            r#"skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str_extern""#
+        ),
+        "skip predicate must be the extern-aware variant: {content}"
+    );
+}
+
+/// Explicit-presence string-extern fields (`optional string foo = N
+/// [(meta.type) = "..."]`) must route Option<Brand> through
+/// `opt_string_extern` so the brand stays invisible to serde — without
+/// this shim, the parent's derive falls back to
+/// `<Option<Brand> as Serialize/Deserialize>` which would force a
+/// `Brand: Serialize + Deserialize` bound the contract does not require.
+#[test]
+fn explicit_string_extern_uses_opt_string_extern() {
+    let mut file = proto3_file("ext_serde_opt_string.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("opt_path".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_STRING),
+            proto3_optional: Some(true),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("_opt_path".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: false,
+        generate_json: true,
+        extern_field_paths: vec![ExternFieldPath::new(".Msg.opt_path", "crate::wrap::Foo")],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_serde_opt_string.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        content.contains(r#"with = "::buffa::json_helpers::opt_string_extern""#),
+        "Option<StringBrand> field must route through opt_string_extern: {content}"
+    );
+    assert!(
+        !content.contains(r#"with = "::buffa::json_helpers::proto_string_extern""#),
+        "explicit-presence string must NOT use the implicit-presence shim: {content}"
+    );
+}

@@ -350,6 +350,100 @@ pub mod proto_string {
     }
 }
 
+/// Serde adapter for `(mnos.meta.type)`-style brand wrappers around
+/// [`alloc::string::String`] for **implicit-presence** string fields.
+///
+/// Generic over the brand type `T`. The serialization round-trip is identical
+/// to [`proto_string`]'s — proto3 JSON's plain-string representation — with
+/// one extra `AsRef<String>` / `From<String>` hop. The brand type is inferred
+/// from the field type at the call site (the `with =` attribute carries only
+/// this module's path; serde-derive's expansion supplies `T` via the field's
+/// declared type).
+///
+/// Required impls on `T`:
+/// - `::core::convert::AsRef<::buffa::alloc::string::String>`
+/// - `::core::convert::From<::buffa::alloc::string::String>`
+///
+/// (Identical to the owned-side binary codec contract; no new requirements.)
+///
+/// For **explicit-presence** (`Option<T>`) fields, see [`opt_string_extern`].
+pub mod proto_string_extern {
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<T, S>(value: &T, s: S) -> Result<S::Ok, S::Error>
+    where
+        T: ::core::convert::AsRef<alloc::string::String>,
+        S: Serializer,
+    {
+        super::proto_string::serialize(value.as_ref().as_str(), s)
+    }
+
+    pub fn deserialize<'de, T, D>(d: D) -> Result<T, D::Error>
+    where
+        T: ::core::convert::From<alloc::string::String>,
+        D: Deserializer<'de>,
+    {
+        super::proto_string::deserialize(d)
+            .map(<T as ::core::convert::From<alloc::string::String>>::from)
+    }
+}
+
+/// Serde adapter for `Option<Brand>` on **explicit-presence** string fields.
+///
+/// Mirrors [`proto_string_extern`] but lifts the round-trip to the
+/// `Option<T>` layer: `None` round-trips through JSON `null` (matching the
+/// numeric `opt_*` shims' contract) and `Some(brand)` round-trips through
+/// the inner [`proto_string_extern`] semantics.
+///
+/// Without this shim, the serde-derive expansion on `Option<Brand>` would
+/// fall back to `<Option<T> as Serialize>::serialize` / `<Option<T> as
+/// Deserialize>::deserialize`, which require `T: Serialize + Deserialize`.
+/// Routing through `opt_string_extern` lets the brand stay invisible to
+/// serde, matching the contract documented on
+/// [`crate::json_helpers::proto_string_extern`].
+pub mod opt_string_extern {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<T, S>(
+        value: &::core::option::Option<T>,
+        s: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        T: ::core::convert::AsRef<alloc::string::String>,
+        S: Serializer,
+    {
+        match value {
+            Some(v) => super::proto_string::serialize(v.as_ref().as_str(), s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, T, D>(
+        d: D,
+    ) -> Result<::core::option::Option<T>, D::Error>
+    where
+        T: ::core::convert::From<alloc::string::String>,
+        D: Deserializer<'de>,
+    {
+        // Use Option<Helper<T>> so JSON null deserializes to None instead of
+        // Some(default) — matches opt_int32 and the rest of the opt_* family.
+        <::core::option::Option<Helper<T>> as Deserialize<'de>>::deserialize(d)
+            .map(|opt| opt.map(|h| h.0))
+    }
+
+    struct Helper<T: ::core::convert::From<alloc::string::String>>(T);
+
+    impl<'de, T> Deserialize<'de> for Helper<T>
+    where
+        T: ::core::convert::From<alloc::string::String>,
+    {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            super::proto_string::deserialize(d)
+                .map(|s| Helper(<T as ::core::convert::From<alloc::string::String>>::from(s)))
+        }
+    }
+}
+
 // ── enum ─────────────────────────────────────────────────────────────────────
 
 /// Serde with-module for `EnumValue<E>` fields that accepts JSON `null` as the default.
@@ -1515,6 +1609,11 @@ pub mod skip_if {
     }
     pub fn is_empty_str(v: &str) -> bool {
         v.is_empty()
+    }
+    /// Extern-aware variant of [`is_empty_str`] for brand wrappers around
+    /// [`alloc::string::String`]. `T` is inferred from the field type.
+    pub fn is_empty_str_extern<T: ::core::convert::AsRef<alloc::string::String>>(v: &T) -> bool {
+        v.as_ref().is_empty()
     }
     pub fn is_empty_bytes(v: &[u8]) -> bool {
         v.is_empty()
