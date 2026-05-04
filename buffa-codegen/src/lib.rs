@@ -162,6 +162,10 @@ impl ExternFieldPath {
     ///
     /// See [`view_path`](Self::view_path) for the contract; this is meaningful
     /// only for `TYPE_STRING` fields and is validated at `generate` time.
+    ///
+    /// The view path must be the bare type name without lifetime parameters
+    /// (e.g. `"::my_crate::wrap::FooRef"`). Codegen attaches `<'a>` /
+    /// `<'_>` automatically at field-declaration and conversion sites.
     #[must_use]
     pub fn with_view_path(mut self, view_path: impl Into<String>) -> Self {
         self.view_path = Some(view_path.into());
@@ -303,21 +307,85 @@ pub struct CodeGenConfig {
     /// Replace the emitted Rust type for matching scalar fields with a
     /// user-supplied path.
     ///
-    /// The owned extern type must implement `From<Inner>` and `AsRef<Inner>`,
-    /// where `Inner` is the literal scalar Rust type buffa would have emitted
-    /// (`String` for `TYPE_STRING`, `u32` for `TYPE_UINT32`/`TYPE_FIXED32`,
-    /// etc.). It must additionally implement `Default` only when the field
-    /// has proto3 implicit-presence semantics (stored bare rather than
-    /// `Option<_>`-wrapped).
+    /// # Brand contract
     ///
-    /// `view_path` (per entry) is meaningful only for `TYPE_STRING` fields,
-    /// where it names a borrowed counterpart implementing `From<&'a str>` and
-    /// `AsRef<str>`. Numeric scalars store their values by-value in views;
-    /// configuring a view path on a numeric field is a build error.
+    /// **Always required on every brand** (applies to all variants below):
+    /// - `::core::clone::Clone` — buffa's owned struct derives `Clone`.
+    /// - `::core::cmp::PartialEq` — buffa's owned struct derives `PartialEq`.
+    /// - `::core::fmt::Debug` — buffa emits a manual `Debug` impl that
+    ///   calls `.field(name, &self.x)`, so each field's type must be
+    ///   `Debug`.
     ///
-    /// Map keys/values and oneof variants are excluded from the lookup;
-    /// `bytes`-typed fields matched by `bytes_fields` take precedence over any
-    /// extern path entry.
+    /// **Owned brand** (`owned_path`):
+    /// - `::core::convert::From<Inner>` (decode; binary + JSON via
+    ///   `proto_string_extern` / `opt_string_extern` /
+    ///   `{int32,uint32,...}_extern` / `opt_{int32,uint32,...}_extern`
+    ///   shims).
+    /// - `::core::convert::AsRef<Inner>` (encode/size). For string fields,
+    ///   `Inner = ::buffa::alloc::string::String`.
+    /// - `::core::default::Default` — required when the field has implicit
+    ///   presence (proto3 non-optional); `clear()`, the message's derived
+    ///   `Default`, and the JSON skip-defaults predicates call this.
+    ///
+    /// The brand does **not** need to impl `serde::Serialize` /
+    /// `serde::Deserialize`. Buffa's generated `#[serde(with = "...")]`
+    /// attributes route through the `*_extern` shim modules, which use
+    /// `From<Inner>` / `AsRef<Inner>` directly. The brand is invisible
+    /// to serde at every singular and explicit-presence call site.
+    ///
+    /// **Owned brand for a string field — additional, when `generate_views = true`:**
+    /// - `::core::convert::From<&str>` — used by view→owned when `view_path`
+    ///   is unset (the view side keeps the raw `&'a str`).
+    /// - `::core::convert::From<&View>` — used by view→owned when `view_path`
+    ///   is set; `View` is the type at `view_path`.
+    ///
+    /// **View brand** (`view_path`, only meaningful for `TYPE_STRING`):
+    /// - **The `view_path` string MUST be the bare type name without
+    ///   lifetime parameters** (e.g. `"::my_crate::wrap::FooRef"` — NOT
+    ///   `"::my_crate::wrap::FooRef<'a>"`). Codegen attaches `<'a>` /
+    ///   `<'_>` automatically at field-declaration and conversion sites.
+    /// - `::core::convert::From<&'a str>` (decode).
+    /// - `::core::convert::AsRef<str>` — encode/size. The borrowed view
+    ///   never owns a `String`, so the wrap helper uses `AsRef<str>` and
+    ///   feeds the result into `string_encoded_len(&str)` /
+    ///   `encode_string(&str, _)`. (Owned side keeps `AsRef<String>`.)
+    /// - `::core::default::Default` — required because the view struct's
+    ///   default emission constructs each field via `Default::default()`.
+    ///   When at least one field on a message has a `view_path`, codegen
+    ///   replaces the view struct's `#[derive(Default)]` with an explicit
+    ///   `impl Default`.
+    /// - `::core::clone::Clone` + `::core::marker::Copy` +
+    ///   `::core::fmt::Debug` + `::core::cmp::PartialEq` — buffa's view
+    ///   struct derives `Clone, Debug` (always) plus `Default` (when no
+    ///   extern view-path field is present); each field type must satisfy
+    ///   those bounds.
+    ///
+    /// **Numeric brand** (no view variant; `view_path` on a numeric field
+    /// is a build error):
+    /// - `::core::convert::From<Inner>` and `::core::convert::AsRef<Inner>`
+    ///   on the owned brand.
+    /// - `::core::default::Default` — same implicit-presence rule as
+    ///   strings.
+    ///
+    /// View structs always store the raw scalar for numeric extern fields;
+    /// view→owned wraps via `<Owned as From<Inner>>::from(view_value)` at
+    /// the conversion site.
+    ///
+    /// # Limitations
+    ///
+    /// **Repeated extern fields with `generate_json = true`** currently
+    /// require the brand to additionally impl `serde::Serialize` +
+    /// `serde::Deserialize`. The repeated path falls through to serde
+    /// derive's `Vec<Brand>: Serialize/Deserialize`, which requires those
+    /// bounds. Singular and explicit-presence (`Option<Brand>`) paths
+    /// route through extern shims and do not impose this requirement.
+    /// A future change can add `repeated_*_extern` shims to lift this.
+    ///
+    /// # Map keys / values, oneof variants, bytes
+    ///
+    /// Map keys/values and oneof variants are excluded from lookup.
+    /// `bytes`-typed fields matched by `bytes_fields` take precedence.
+    /// `TYPE_BYTES` and `TYPE_BOOL` are not supported wire types.
     pub extern_field_paths: Vec<ExternFieldPath>,
 }
 
@@ -525,9 +593,16 @@ pub enum IncludeMode<'a> {
 
 /// Validate all `extern_field_paths` entries in any file being generated.
 ///
-/// Two checks are performed for each field that matches an entry:
+/// Three checks are performed:
 ///
-/// 1. **Wire-type guard** — `extern_field_path` is only supported for
+/// 1. **Bare view-path** — each entry's `view_path` must be a bare type
+///    name without lifetime parameters; codegen attaches `<'a>` / `<'_>`
+///    automatically at field-declaration and conversion sites. A
+///    `view_path` containing `<` is rejected up-front so the user sees a
+///    clear error instead of opaque `prettyplease`/`syn` failures inside
+///    generated code.
+///
+/// 2. **Wire-type guard** — `extern_field_path` is only supported for
 ///    `TYPE_STRING` and numeric scalar types (`TYPE_INT32` through
 ///    `TYPE_DOUBLE`). Using it on `TYPE_BYTES`, `TYPE_MESSAGE`,
 ///    `TYPE_GROUP`, `TYPE_ENUM`, or `TYPE_BOOL` is a configuration error.
@@ -537,7 +612,7 @@ pub enum IncludeMode<'a> {
 ///    - A `TYPE_MESSAGE` field that is a map field silently skips (codegen
 ///      already no-ops extern entries on map fields).
 ///
-/// 2. **View-path guard** — `view_path` is meaningful only for
+/// 3. **View-path guard** — `view_path` is meaningful only for
 ///    `TYPE_STRING` fields. A `view_path` on any numeric scalar is a
 ///    configuration mistake.
 ///
@@ -546,8 +621,9 @@ pub enum IncludeMode<'a> {
 ///
 /// # Errors
 ///
-/// Returns [`CodeGenError::Other`] naming the offending field FQN and its
-/// actual wire type when either constraint is violated.
+/// Returns [`CodeGenError::InvalidTypePath`] for the bare-path check, and
+/// [`CodeGenError::Other`] naming the offending field FQN and its actual
+/// wire type when either field-level constraint is violated.
 fn validate_extern_field_paths(
     ctx: &context::CodeGenContext,
     file_descriptors: &[FileDescriptorProto],
@@ -555,6 +631,23 @@ fn validate_extern_field_paths(
 ) -> Result<(), CodeGenError> {
     if ctx.config.extern_field_paths.is_empty() {
         return Ok(());
+    }
+
+    // Per-entry shape check: view_path must be a bare type name. Codegen
+    // attaches `<'a>` / `<'_>` automatically at field-declaration and
+    // conversion sites; embedding a lifetime parameter in the user-supplied
+    // string produces invalid syntax (e.g. `FooRef<'a><'a>`) deep inside
+    // generated code where the diagnostic is unhelpful.
+    for entry in &ctx.config.extern_field_paths {
+        if let Some(view_path) = &entry.view_path {
+            if view_path.contains('<') {
+                return Err(CodeGenError::InvalidTypePath(format!(
+                    "extern_field_path view_path {view_path:?} must be a bare type \
+                     name; codegen attaches the view lifetime <'a> automatically. \
+                     Strip the lifetime parameter from your view_path argument."
+                )));
+            }
+        }
     }
 
     for file_name in files_to_generate {

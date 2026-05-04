@@ -1277,3 +1277,39 @@ fn view_struct_with_extern_view_path_emits_explicit_default_impl() {
         "view struct with extern view-path field must NOT derive Default: {content}"
     );
 }
+
+/// `view_path` strings must be the bare type name. Codegen attaches `<'a>`
+/// / `<'_>` automatically at field-declaration and conversion sites; a
+/// user-supplied `"FooRef<'a>"` would expand to `FooRef<'a><'a>` deep in
+/// generated source where `prettyplease` / `syn` reports an opaque error.
+/// The validation runs at `generate` time and points the user at the
+/// configuration mistake directly.
+#[test]
+fn view_path_with_lifetime_is_rejected() {
+    let mut file = proto3_file("ext_view_path_with_lifetime.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("path", 1, Label::LABEL_OPTIONAL, Type::TYPE_STRING)],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![
+            ExternFieldPath::new(".Msg.path", "crate::wrap::Foo")
+                .with_view_path("crate::wrap::FooRef<'a>"),
+        ],
+        ..CodeGenConfig::default()
+    };
+    let err = generate(
+        &[file],
+        &["ext_view_path_with_lifetime.proto".to_string()],
+        &config,
+    )
+    .expect_err("should reject view_path with lifetime parameter");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("bare type name") || msg.contains("FooRef<'a>"),
+        "error should mention the bare-path requirement: {msg}"
+    );
+}

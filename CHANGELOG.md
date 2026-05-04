@@ -23,6 +23,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   implicit-presence scalars); buffa emits explicit-trait
   disambiguation at decode and encode sites so additional `From` /
   `AsRef` impls a downstream user adds remain non-conflicting.
+- **`extern_field_paths` — JSON, view, clear coverage.** Closes the gaps
+  for end-to-end use of `extern_field_paths` on real consumer schemas:
+  - Owned-side serde now routes through `proto_string_extern` /
+    `opt_string_extern` / `{int32,uint32,...}_extern` /
+    `opt_{int32,uint32,...}_extern` modules and matching
+    `is_empty_str_extern` / `is_zero_*_extern` skip predicates. Modules
+    are generic over the brand `T`; serde-derive infers `T` from the
+    field type (no turbofish in the `with =` attribute string). Both
+    implicit-presence (`Brand`) and explicit-presence (`Option<Brand>`)
+    fields keep the brand invisible to serde — no `Serialize` /
+    `Deserialize` impls required on the brand for either case.
+  - View-side encode + size + `to_owned_message` now consult the same
+    `extern_field_paths` table the owned side uses, with view-path-aware
+    wrap helpers including a numeric variant.
+  - `scalar_clear_stmt` for implicit-presence extern fields now emits
+    `<Owned as Default>::default()` instead of raw scalar assignments.
+  - View structs with at least one extern view-path field now emit an
+    explicit `Default` impl in place of `#[derive(Default)]`, requiring
+    the view-path type to impl `Default` (newly documented in the
+    brand contract).
+  - `buffa-build::Config` gains `extern_field_path` and
+    `extern_field_path_with_view` builders so downstream `build.rs`
+    consumers can wire `extern_field_paths` symmetrically with the
+    existing `extern_path` (per-package) builder.
+
+  Per-field type swaps now compose with `generate_json = true` and
+  `generate_views = true` simultaneously. Four fixture crates under
+  `buffa-codegen/tests/fixtures/extern_field_paths/` exercise every
+  `(generate_views, generate_json)` corner: each runs codegen via
+  `buffa-build`, then encode-decodes a message through the brand types
+  in its own `#[test]` fns.
+
+  **Brand contract additions** (only affects consumers using extern_field_paths):
+  - View-side string brand now requires `AsRef<str>` (the borrowed
+    `*Ref<'a>` cannot impl `AsRef<String>`; the owned-side
+    `AsRef<String>` requirement is unchanged).
+  - View-side string brand now requires `Default`.
+  - Owned-side string brand with views enabled now requires `From<&str>`
+    (no `view_path`) and/or `From<&View>` (`view_path` set).
+  - The `view_path` string MUST be the bare type name without lifetime
+    parameters; codegen attaches `<'a>` automatically.
+  - Standard derives `Clone` / `Debug` / `PartialEq` are documented as
+    always-required (already implied by buffa's owned/view struct
+    emission, but newly called out in the contract).
+
+  **Known limitation:** repeated extern fields with `generate_json = true`
+  still require `Serialize` + `Deserialize` on the brand because the
+  repeated path falls through to serde derive's
+  `Vec<Brand>: Serialize/Deserialize`. Singular and explicit-presence
+  paths are unaffected. A future change can add `repeated_*_extern`
+  shims; the limitation is documented on
+  `CodeGenConfig::extern_field_paths`.
 - `protoc-gen-buffa` and `protoc-gen-buffa-packaging` now respond to
   `--version` / `-V` and `--help` / `-h` instead of blocking on stdin.
   Any other command-line argument prints a "this is a protoc plugin" hint

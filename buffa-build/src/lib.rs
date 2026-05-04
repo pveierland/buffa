@@ -280,6 +280,11 @@ impl Config {
     /// contract on [`CodeGenConfig::extern_field_paths`] for the impls
     /// required on `View<'a>`.
     ///
+    /// The `view_path` argument must be the bare type name without
+    /// lifetime parameters (e.g. `"::my_crate::wrap::FooRef"`). Codegen
+    /// attaches `<'a>` / `<'_>` automatically at field-declaration and
+    /// conversion sites.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
