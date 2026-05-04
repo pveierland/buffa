@@ -1442,18 +1442,60 @@ fn singular_to_owned(
         features,
         ..
     } = scope;
+    let field_fqn = format!(".{proto_fqn}.{field_name}");
+
     if is_explicit_presence_scalar(field, ty, features) {
         return Ok(match ty {
-            Type::TYPE_STRING => quote! { self.#ident.map(|s| s.to_string()) },
+            Type::TYPE_STRING => match ctx
+                .try_wrap_extern_view_to_owned(&field_fqn, quote! { v })?
+            {
+                Some(inner) => quote! { self.#ident.map(|v| #inner) },
+                None => quote! { self.#ident.map(|s| s.to_string()) },
+            },
             Type::TYPE_BYTES => {
                 let conv = bytes_to_owned(ctx, proto_fqn, field_name, quote! { b });
                 quote! { self.#ident.map(|b| #conv) }
+            }
+            // Numeric explicit-presence: map through From<Inner> if extern.
+            t if matches!(
+                t,
+                Type::TYPE_INT32
+                    | Type::TYPE_SINT32
+                    | Type::TYPE_SFIXED32
+                    | Type::TYPE_UINT32
+                    | Type::TYPE_FIXED32
+                    | Type::TYPE_INT64
+                    | Type::TYPE_SINT64
+                    | Type::TYPE_SFIXED64
+                    | Type::TYPE_UINT64
+                    | Type::TYPE_FIXED64
+                    | Type::TYPE_FLOAT
+                    | Type::TYPE_DOUBLE
+            ) =>
+            {
+                let inner_ty = crate::message::scalar_rust_type(
+                    t,
+                    &crate::imports::ImportResolver::new(),
+                )?;
+                match ctx.try_wrap_extern_view_numeric_to_owned(
+                    &field_fqn,
+                    &inner_ty,
+                    quote! { v },
+                )? {
+                    Some(inner) => quote! { self.#ident.map(|v| #inner) },
+                    None => quote! { self.#ident },
+                }
             }
             _ => quote! { self.#ident },
         });
     }
     Ok(match ty {
-        Type::TYPE_STRING => quote! { self.#ident.to_string() },
+        Type::TYPE_STRING => match ctx
+            .try_wrap_extern_view_to_owned(&field_fqn, quote! { self.#ident })?
+        {
+            Some(expr) => expr,
+            None => quote! { self.#ident.to_string() },
+        },
         Type::TYPE_BYTES => bytes_to_owned(ctx, proto_fqn, field_name, quote! { self.#ident }),
         Type::TYPE_MESSAGE | Type::TYPE_GROUP => {
             let owned_path = resolve_owned_path(scope, field)?;
@@ -1469,6 +1511,34 @@ fn singular_to_owned(
                 }
             }
         }
+        // Numeric implicit-presence: wrap through From<Inner> if extern.
+        t if matches!(
+            t,
+            Type::TYPE_INT32
+                | Type::TYPE_SINT32
+                | Type::TYPE_SFIXED32
+                | Type::TYPE_UINT32
+                | Type::TYPE_FIXED32
+                | Type::TYPE_INT64
+                | Type::TYPE_SINT64
+                | Type::TYPE_SFIXED64
+                | Type::TYPE_UINT64
+                | Type::TYPE_FIXED64
+                | Type::TYPE_FLOAT
+                | Type::TYPE_DOUBLE
+        ) =>
+        {
+            let inner_ty =
+                crate::message::scalar_rust_type(t, &crate::imports::ImportResolver::new())?;
+            match ctx.try_wrap_extern_view_numeric_to_owned(
+                &field_fqn,
+                &inner_ty,
+                quote! { self.#ident },
+            )? {
+                Some(expr) => expr,
+                None => quote! { self.#ident },
+            }
+        }
         _ => quote! { self.#ident },
     })
 }
@@ -1480,8 +1550,12 @@ fn repeated_to_owned(
     field_name: &str,
 ) -> Result<TokenStream, CodeGenError> {
     let MessageScope { ctx, proto_fqn, .. } = scope;
+    let field_fqn = format!(".{proto_fqn}.{field_name}");
     Ok(match ty {
-        Type::TYPE_STRING => quote! { self.#ident.iter().map(|s| s.to_string()).collect() },
+        Type::TYPE_STRING => match ctx.try_wrap_extern_view_to_owned(&field_fqn, quote! { s })? {
+            Some(elem) => quote! { self.#ident.iter().map(|s| #elem).collect() },
+            None => quote! { self.#ident.iter().map(|s| s.to_string()).collect() },
+        },
         Type::TYPE_BYTES => {
             // Vec<&[u8]>::iter() → b: &&[u8]. bytes_to_owned handles double-ref.
             let conv = bytes_to_owned(ctx, proto_fqn, field_name, quote! { b });
@@ -1489,6 +1563,34 @@ fn repeated_to_owned(
         }
         Type::TYPE_MESSAGE | Type::TYPE_GROUP => {
             quote! { self.#ident.iter().map(|v| v.to_owned_from_source(__buffa_src)).collect() }
+        }
+        // Numeric repeated: wrap each element through From<Inner> if extern.
+        t if matches!(
+            t,
+            Type::TYPE_INT32
+                | Type::TYPE_SINT32
+                | Type::TYPE_SFIXED32
+                | Type::TYPE_UINT32
+                | Type::TYPE_FIXED32
+                | Type::TYPE_INT64
+                | Type::TYPE_SINT64
+                | Type::TYPE_SFIXED64
+                | Type::TYPE_UINT64
+                | Type::TYPE_FIXED64
+                | Type::TYPE_FLOAT
+                | Type::TYPE_DOUBLE
+        ) =>
+        {
+            let inner_ty =
+                crate::message::scalar_rust_type(t, &crate::imports::ImportResolver::new())?;
+            match ctx.try_wrap_extern_view_numeric_to_owned(
+                &field_fqn,
+                &inner_ty,
+                quote! { v },
+            )? {
+                Some(elem) => quote! { self.#ident.iter().copied().map(|v| #elem).collect() },
+                None => quote! { self.#ident.to_vec() },
+            }
         }
         _ => quote! { self.#ident.to_vec() },
     })

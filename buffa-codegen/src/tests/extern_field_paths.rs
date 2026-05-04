@@ -1027,3 +1027,153 @@ fn repeated_string_extern_encode_wraps_loop_body() {
         "view repeated encode must wrap each element via ItemRef AsRef<str>: {content}"
     );
 }
+
+/// View-to-owned for a string-extern field with view_path must call
+/// `<Owned as From<&View>>::from(&self.path)` rather than `self.path.to_string()`.
+#[test]
+fn view_string_extern_to_owned_with_view_path_routes_through_from_view() {
+    let mut file = proto3_file("ext_view_to_owned_vp.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("path", 1, Label::LABEL_OPTIONAL, Type::TYPE_STRING)],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![
+            ExternFieldPath::new(".Msg.path", "crate::wrap::Foo")
+                .with_view_path("crate::wrap::FooRef"),
+        ],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_view_to_owned_vp.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        contains_normalized(
+            &content,
+            "<crate::wrap::Foo as ::core::convert::From<&crate::wrap::FooRef>>::from(&self.path)"
+        ),
+        "view-to-owned must route extern string through From<&View>: {content}"
+    );
+    assert!(
+        !contains_normalized(&content, "self.path.to_string()"),
+        "view-to-owned must NOT call to_string() on view-typed extern field: {content}"
+    );
+}
+
+/// Without view_path, the view side has raw `&'a str`. View-to-owned must
+/// wrap via `<Owned as From<&str>>::from(self.path)`.
+#[test]
+fn view_string_extern_to_owned_without_view_path_uses_from_str() {
+    let mut file = proto3_file("ext_view_to_owned_no_vp.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("path", 1, Label::LABEL_OPTIONAL, Type::TYPE_STRING)],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![ExternFieldPath::new(".Msg.path", "crate::wrap::Foo")],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_view_to_owned_no_vp.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        contains_normalized(
+            &content,
+            "<crate::wrap::Foo as ::core::convert::From<&str>>::from(self.path)"
+        ),
+        "no-view-path view-to-owned must wrap via From<&str>: {content}"
+    );
+}
+
+/// Numeric extern: view side has raw `u32`; owned side has `Idx`.
+/// to_owned must wrap via `<Idx as From<u32>>::from(self.idx)`.
+#[test]
+fn view_numeric_extern_to_owned_wraps_through_from_inner() {
+    let mut file = proto3_file("ext_view_numeric_to_owned.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("idx", 1, Label::LABEL_OPTIONAL, Type::TYPE_UINT32)],
+        ..Default::default()
+    });
+
+    // `extern_path_config` disables views, but `to_owned_message` is generated
+    // only on the view side — so this test inlines a config with
+    // `generate_views: true` to actually exercise the view-to-owned path.
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![ExternFieldPath::new(".Msg.idx", "crate::wrap::Idx")],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_view_numeric_to_owned.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        contains_normalized(
+            &content,
+            "<crate::wrap::Idx as ::core::convert::From<u32>>::from(self.idx)"
+        ),
+        "numeric view-to-owned must wrap via From<Inner>: {content}"
+    );
+    assert!(
+        !contains_normalized(&content, "index: self.index,"),
+        "raw numeric assignment must not survive when extern path matches"
+    );
+}
+
+/// Explicit-presence numeric extern: view side has `Option<u32>`; owned side
+/// has `Option<Idx>`. to_owned must map the inner.
+#[test]
+fn view_explicit_numeric_extern_to_owned_maps_inner() {
+    let mut file = proto3_file("ext_view_opt_numeric_to_owned.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("idx".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_UINT32),
+            proto3_optional: Some(true),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("_idx".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    // `extern_path_config` disables views, but `to_owned_message` is generated
+    // only on the view side — so this test inlines a config with
+    // `generate_views: true` to actually exercise the view-to-owned path.
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![ExternFieldPath::new(".Msg.idx", "crate::wrap::Idx")],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_view_opt_numeric_to_owned.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    // prettyplease line-wraps `self.idx.map(...)` across multiple lines as
+    // `self\n .idx\n .map(...)`, which contains_normalized collapses to
+    // `self .idx .map(...)`. The normalizer doesn't strip whitespace around
+    // the dot, so we assert against the wrap-shape suffix that prettyplease
+    // never breaks.
+    assert!(
+        contains_normalized(
+            &content,
+            ".map(|v| <crate::wrap::Idx as ::core::convert::From<u32>>::from(v))"
+        ),
+        "Option<Brand> numeric to_owned must map through From<Inner>: {content}"
+    );
+}
