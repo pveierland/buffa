@@ -232,6 +232,87 @@ impl Config {
         self
     }
 
+    /// Replace the emitted Rust type for a specific proto field with a
+    /// user-supplied path. See [`CodeGenConfig::extern_field_paths`] for
+    /// the full brand contract.
+    ///
+    /// `field_fqn` is a fully-qualified protobuf field path (e.g.
+    /// `".my.pkg.MyMessage.my_field"`). The leading `.` is optional and
+    /// will be added automatically. Use [`extern_field_path_with_view`] to
+    /// also configure a borrowed `View<'a>` brand for view-side codegen on
+    /// `TYPE_STRING` fields.
+    ///
+    /// `owned_path` is the Rust path of the brand wrapper that replaces
+    /// the natural scalar type on the owned struct, e.g.
+    /// `"::my_crate::wrap::NixStorePath"`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// buffa_build::Config::new()
+    ///     .extern_field_path(".my.pkg.MyMessage.path", "::my_crate::wrap::Path")
+    ///     .files(&["proto/my_service.proto"])
+    ///     .includes(&["proto/"])
+    ///     .compile()
+    ///     .unwrap();
+    /// ```
+    ///
+    /// [`extern_field_path_with_view`]: Self::extern_field_path_with_view
+    #[must_use]
+    pub fn extern_field_path(
+        mut self,
+        field_fqn: impl Into<String>,
+        owned_path: impl Into<String>,
+    ) -> Self {
+        let mut field_fqn = field_fqn.into();
+        if !field_fqn.starts_with('.') {
+            field_fqn.insert(0, '.');
+        }
+        self.codegen_config
+            .extern_field_paths
+            .push(buffa_codegen::ExternFieldPath::new(field_fqn, owned_path));
+        self
+    }
+
+    /// Variant of [`extern_field_path`] that also configures the borrowed
+    /// view brand for `TYPE_STRING` fields. Only meaningful when
+    /// [`generate_views`](Self::generate_views) is enabled. See the brand
+    /// contract on [`CodeGenConfig::extern_field_paths`] for the impls
+    /// required on `View<'a>`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// buffa_build::Config::new()
+    ///     .extern_field_path_with_view(
+    ///         ".my.pkg.MyMessage.path",
+    ///         "::my_crate::wrap::Path",
+    ///         "::my_crate::wrap::PathRef",
+    ///     )
+    ///     .files(&["proto/my_service.proto"])
+    ///     .includes(&["proto/"])
+    ///     .compile()
+    ///     .unwrap();
+    /// ```
+    ///
+    /// [`extern_field_path`]: Self::extern_field_path
+    #[must_use]
+    pub fn extern_field_path_with_view(
+        mut self,
+        field_fqn: impl Into<String>,
+        owned_path: impl Into<String>,
+        view_path: impl Into<String>,
+    ) -> Self {
+        let mut field_fqn = field_fqn.into();
+        if !field_fqn.starts_with('.') {
+            field_fqn.insert(0, '.');
+        }
+        self.codegen_config.extern_field_paths.push(
+            buffa_codegen::ExternFieldPath::new(field_fqn, owned_path).with_view_path(view_path),
+        );
+        self
+    }
+
     /// Configure `bytes` fields to use `bytes::Bytes` instead of `Vec<u8>`.
     ///
     /// Each path is a fully-qualified proto path prefix. Use `"."` to apply
@@ -1054,5 +1135,27 @@ mod tests {
             .map(|(_, a)| a.as_str())
             .collect();
         assert_eq!(paths, vec!["#[derive(A)]", "#[derive(B)]", "#[derive(C)]"]);
+    }
+
+    #[test]
+    fn extern_field_path_normalizes_leading_dot() {
+        let config = Config::new().extern_field_path("my.pkg.Msg.path", "::my::Path");
+        let entry = &config.codegen_config.extern_field_paths[0];
+        assert_eq!(entry.fqn_prefix, ".my.pkg.Msg.path");
+        assert_eq!(entry.owned_path, "::my::Path");
+        assert!(entry.view_path.is_none());
+    }
+
+    #[test]
+    fn extern_field_path_with_view_sets_view_path() {
+        let config = Config::new().extern_field_path_with_view(
+            ".my.pkg.Msg.path",
+            "::my::Path",
+            "::my::PathRef",
+        );
+        let entry = &config.codegen_config.extern_field_paths[0];
+        assert_eq!(entry.fqn_prefix, ".my.pkg.Msg.path");
+        assert_eq!(entry.owned_path, "::my::Path");
+        assert_eq!(entry.view_path.as_deref(), Some("::my::PathRef"));
     }
 }
