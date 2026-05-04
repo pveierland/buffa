@@ -2016,6 +2016,10 @@ fn repeated_payload_size_expr(
             // so unwrap with an explicit-trait `AsRef` deref before sizing.
             let resolver = crate::imports::ImportResolver::new();
             let has_extern = ctx.lookup_extern_field_path(extern_fqn).is_some();
+            // The unswapped loop destructures `|&v|` to `v: Inner` (Inner: Copy),
+            // so the size expression operates on `v` directly. The swapped loop
+            // binds `|v|` to `&Owned`; the wrap helper deref-projects through
+            // the brand's `AsRef<Inner>` to produce a value-typed expression.
             let v_token = if has_extern {
                 let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
                 wrap_encode_value(
@@ -2027,13 +2031,9 @@ fn repeated_payload_size_expr(
                     quote! { v },
                 )?
             } else {
-                quote! { *v }
+                quote! { v }
             };
             let size_expr = type_encoded_size_expr(ty, &v_token);
-            // The loop binding is `v: &Inner` for the unswapped (Copy) path;
-            // re-using the existing `|&v|` destructuring keeps the unswapped
-            // emit byte-identical. For the swapped path, change to `|v|` so
-            // the binding is `&Owned` and the wrap helper can dereference.
             if has_extern {
                 quote! { self.#ident.iter().map(|v| #size_expr).sum::<u32>() }
             } else {
