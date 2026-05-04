@@ -444,6 +444,89 @@ pub mod opt_string_extern {
     }
 }
 
+// ── numeric extern shims ─────────────────────────────────────────────────────
+
+/// Generates an extern-aware variant of a numeric serde with-module.
+/// Round-trips through the brand wrapper's `From<Inner>` / `AsRef<Inner>`
+/// impls; serialize uses the existing inner-type shim's serializer, and
+/// deserialize wraps the inner-type shim's result via the brand's `From`.
+///
+/// `$name` is the new module identifier (e.g. `uint32_extern`); `$inner`
+/// is the bare Rust scalar type (e.g. `u32`); `$inner_shim` is the
+/// existing vanilla module identifier (e.g. `uint32`).
+macro_rules! numeric_extern_shim {
+    ($name:ident, $inner:ty, $inner_shim:ident) => {
+        pub mod $name {
+            use serde::{Deserializer, Serializer};
+            pub fn serialize<T, S>(value: &T, ser: S) -> Result<S::Ok, S::Error>
+            where
+                T: ::core::convert::AsRef<$inner>,
+                S: Serializer,
+            {
+                super::$inner_shim::serialize(value.as_ref(), ser)
+            }
+            pub fn deserialize<'de, T, D>(de: D) -> Result<T, D::Error>
+            where
+                T: ::core::convert::From<$inner>,
+                D: Deserializer<'de>,
+            {
+                super::$inner_shim::deserialize(de)
+                    .map(<T as ::core::convert::From<$inner>>::from)
+            }
+        }
+    };
+}
+
+numeric_extern_shim!(int32_extern, i32, int32);
+numeric_extern_shim!(uint32_extern, u32, uint32);
+numeric_extern_shim!(int64_extern, i64, int64);
+numeric_extern_shim!(uint64_extern, u64, uint64);
+numeric_extern_shim!(float_extern, f32, float);
+numeric_extern_shim!(double_extern, f64, double);
+
+/// Generates an extern-aware variant of an `Option<Inner>` numeric serde
+/// with-module. Lifts the brand contract over `Option`, mirroring
+/// [`opt_string_extern`]'s shape but for the numeric `opt_*` family.
+///
+/// Relies on `$inner: Copy` for the `*v.as_ref()` deref — true for all
+/// numeric scalars.
+macro_rules! optional_numeric_extern_shim {
+    ($name:ident, $inner:ty, $inner_shim:ident) => {
+        pub mod $name {
+            use serde::{Deserializer, Serializer};
+            pub fn serialize<T, S>(
+                value: &::core::option::Option<T>,
+                ser: S,
+            ) -> Result<S::Ok, S::Error>
+            where
+                T: ::core::convert::AsRef<$inner>,
+                S: Serializer,
+            {
+                let projected: ::core::option::Option<$inner> =
+                    value.as_ref().map(|v| *v.as_ref());
+                super::$inner_shim::serialize(&projected, ser)
+            }
+            pub fn deserialize<'de, T, D>(
+                de: D,
+            ) -> Result<::core::option::Option<T>, D::Error>
+            where
+                T: ::core::convert::From<$inner>,
+                D: Deserializer<'de>,
+            {
+                let v: ::core::option::Option<$inner> = super::$inner_shim::deserialize(de)?;
+                ::core::result::Result::Ok(v.map(<T as ::core::convert::From<$inner>>::from))
+            }
+        }
+    };
+}
+
+optional_numeric_extern_shim!(opt_int32_extern, i32, opt_int32);
+optional_numeric_extern_shim!(opt_uint32_extern, u32, opt_uint32);
+optional_numeric_extern_shim!(opt_int64_extern, i64, opt_int64);
+optional_numeric_extern_shim!(opt_uint64_extern, u64, opt_uint64);
+optional_numeric_extern_shim!(opt_float_extern, f32, opt_float);
+optional_numeric_extern_shim!(opt_double_extern, f64, opt_double);
+
 // ── enum ─────────────────────────────────────────────────────────────────────
 
 /// Serde with-module for `EnumValue<E>` fields that accepts JSON `null` as the default.
@@ -1615,6 +1698,19 @@ pub mod skip_if {
     pub fn is_empty_str_extern<T: ::core::convert::AsRef<alloc::string::String>>(v: &T) -> bool {
         v.as_ref().is_empty()
     }
+    macro_rules! is_zero_extern {
+        ($name:ident, $inner:ty) => {
+            pub fn $name<T: ::core::convert::AsRef<$inner>>(v: &T) -> bool {
+                *v.as_ref() == <$inner as ::core::default::Default>::default()
+            }
+        };
+    }
+    is_zero_extern!(is_zero_i32_extern, i32);
+    is_zero_extern!(is_zero_u32_extern, u32);
+    is_zero_extern!(is_zero_i64_extern, i64);
+    is_zero_extern!(is_zero_u64_extern, u64);
+    is_zero_extern!(is_zero_f32_extern, f32);
+    is_zero_extern!(is_zero_f64_extern, f64);
     pub fn is_empty_bytes(v: &[u8]) -> bool {
         v.is_empty()
     }

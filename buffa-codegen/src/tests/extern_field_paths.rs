@@ -909,3 +909,36 @@ fn explicit_string_extern_uses_opt_string_extern() {
         "explicit-presence string must NOT use the implicit-presence shim: {content}"
     );
 }
+
+/// Numeric extern fields must keep using a numeric shim — adding the extern
+/// path swaps to the `_extern` variant of the same numeric type.
+#[test]
+fn owned_numeric_extern_uses_extern_numeric_shim() {
+    let mut file = proto3_file("ext_serde_numeric.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("idx", 1, Label::LABEL_OPTIONAL, Type::TYPE_UINT32)],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: false,
+        generate_json: true,
+        extern_field_paths: vec![ExternFieldPath::new(".Msg.idx", "crate::wrap::Idx")],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_serde_numeric.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        content.contains(r#"with = "::buffa::json_helpers::uint32_extern""#),
+        "numeric extern serde shim must be uint32_extern: {content}"
+    );
+    assert!(
+        content.contains(
+            r#"skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32_extern""#
+        ),
+        "numeric extern skip predicate must be is_zero_u32_extern: {content}"
+    );
+}

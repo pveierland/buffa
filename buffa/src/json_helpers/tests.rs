@@ -1584,3 +1584,46 @@ mod opt_string_extern_round_trip {
         assert_eq!(w.opt_path, Some(Brand(String::new())));
     }
 }
+
+#[cfg(test)]
+mod uint32_extern_round_trip {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    struct Idx(u32);
+
+    impl ::core::convert::From<u32> for Idx {
+        fn from(v: u32) -> Self {
+            Self(v)
+        }
+    }
+
+    impl ::core::convert::AsRef<u32> for Idx {
+        fn as_ref(&self) -> &u32 {
+            &self.0
+        }
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Wrapper {
+        #[serde(with = "crate::json_helpers::uint32_extern")]
+        #[serde(skip_serializing_if = "crate::json_helpers::skip_if::is_zero_u32_extern")]
+        idx: Idx,
+    }
+
+    #[test]
+    fn brand_round_trips_through_uint32_extern() {
+        let w = Wrapper { idx: Idx(42) };
+        let json = serde_json::to_string(&w).expect("serialize");
+        assert_eq!(json, r#"{"idx":42}"#);
+        let back: Wrapper = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn zero_brand_skipped_by_is_zero_u32_extern() {
+        let w = Wrapper { idx: Idx(0) };
+        let json = serde_json::to_string(&w).expect("serialize");
+        assert_eq!(json, r#"{}"#);
+    }
+}
