@@ -440,8 +440,20 @@ pub fn generate_message_impl(
                 )?);
             }
             FieldKind::Repeated(f) => {
-                compute_stmts.push(repeated_compute_size_stmt(ctx, f, Some(proto_fqn), features)?);
-                write_stmts.push(repeated_write_to_stmt(ctx, f, Some(proto_fqn), features)?);
+                compute_stmts.push(repeated_compute_size_stmt(
+                    ctx,
+                    f,
+                    EmissionSide::Owned,
+                    proto_fqn,
+                    features,
+                )?);
+                write_stmts.push(repeated_write_to_stmt(
+                    ctx,
+                    f,
+                    EmissionSide::Owned,
+                    proto_fqn,
+                    features,
+                )?);
                 merge_arms.push(repeated_merge_arm(
                     ctx,
                     f,
@@ -716,8 +728,20 @@ pub(crate) fn build_view_encode_methods(
                 )?);
             }
             FieldKind::Repeated(f) => {
-                compute_stmts.push(repeated_compute_size_stmt(ctx, f, None, features)?);
-                write_stmts.push(repeated_write_to_stmt(ctx, f, None, features)?);
+                compute_stmts.push(repeated_compute_size_stmt(
+                    ctx,
+                    f,
+                    EmissionSide::View,
+                    proto_fqn,
+                    features,
+                )?);
+                write_stmts.push(repeated_write_to_stmt(
+                    ctx,
+                    f,
+                    EmissionSide::View,
+                    proto_fqn,
+                    features,
+                )?);
             }
             // map_{compute_size,write_to}_stmt emit `for (k, v) in &self.field
             // { ... }`. For owned `&HashMap<K,V>` that yields `(&K, &V)`
@@ -1898,7 +1922,8 @@ fn repeated_payload_size_expr(
     ctx: &CodeGenContext,
     ty: Type,
     ident: &Ident,
-    extern_fqn: Option<&str>,
+    side: EmissionSide,
+    extern_fqn: &str,
 ) -> Result<TokenStream, CodeGenError> {
     Ok(match ty {
         Type::TYPE_FIXED32 | Type::TYPE_SFIXED32 | Type::TYPE_FLOAT => {
@@ -1924,27 +1949,26 @@ fn repeated_payload_size_expr(
             // For extern-typed fields, the loop binding is `&Owned`, not `&Inner`,
             // so unwrap with an explicit-trait `AsRef` deref before sizing.
             let resolver = crate::imports::ImportResolver::new();
-            let v_token = match extern_fqn {
-                Some(fqn) => {
-                    let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-                    ctx.wrap_extern_encode_value(
-                        fqn,
-                        &inner_ty,
-                        quote! { *v },
-                        quote! { v },
-                    )?
-                }
-                None => quote! { *v },
+            let has_extern = ctx.lookup_extern_field_path(extern_fqn).is_some();
+            let v_token = if has_extern {
+                let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                wrap_encode_value(
+                    ctx,
+                    side,
+                    extern_fqn,
+                    &inner_ty,
+                    quote! { *v },
+                    quote! { v },
+                )?
+            } else {
+                quote! { *v }
             };
             let size_expr = type_encoded_size_expr(ty, &v_token);
             // The loop binding is `v: &Inner` for the unswapped (Copy) path;
             // re-using the existing `|&v|` destructuring keeps the unswapped
             // emit byte-identical. For the swapped path, change to `|v|` so
             // the binding is `&Owned` and the wrap helper can dereference.
-            if extern_fqn
-                .and_then(|fqn| ctx.lookup_extern_field_path(fqn))
-                .is_some()
-            {
+            if has_extern {
                 quote! { self.#ident.iter().map(|v| #size_expr).sum::<u32>() }
             } else {
                 quote! { self.#ident.iter().map(|&v| #size_expr).sum::<u32>() }
@@ -1956,7 +1980,8 @@ fn repeated_payload_size_expr(
 fn repeated_compute_size_stmt(
     ctx: &CodeGenContext,
     field: &FieldDescriptorProto,
-    proto_fqn: Option<&str>,
+    side: EmissionSide,
+    proto_fqn: &str,
     features: &ResolvedFeatures,
 ) -> Result<TokenStream, CodeGenError> {
     let field_name = field
@@ -1966,9 +1991,11 @@ fn repeated_compute_size_stmt(
     let field_number = validated_field_number(field)?;
     let ty = effective_type(ctx, field, features);
     let ident = make_field_ident(field_name);
-    // `extern_field_paths` is owned-only; views pass `proto_fqn = None`.
-    let extern_fqn = proto_fqn.map(|p| format!(".{}.{}", p, field_name));
-    let extern_fqn = extern_fqn.as_deref();
+    // `extern_field_paths` applies to both sides. On the owned side
+    // `wrap_encode_ref/value` route through `extern.owned_path`; on the view
+    // side they route through `extern.view_path` (no-op when unset).
+    let extern_fqn = format!(".{proto_fqn}.{field_name}");
+    let extern_fqn: &str = &extern_fqn;
     let resolver = crate::imports::ImportResolver::new();
     // LengthDelimited tag (wire type 2): used for packed, message, string, bytes.
     let ld_tag_len = tag_encoded_len(field_number, 2);
@@ -2027,10 +2054,7 @@ fn repeated_compute_size_stmt(
         let per_elem_size = match ty {
             Type::TYPE_STRING => {
                 let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-                let v_ref = match extern_fqn {
-                    Some(fqn) => ctx.wrap_extern_encode_ref(fqn, &inner_ty, quote! { v })?,
-                    None => quote! { v },
-                };
+                let v_ref = wrap_encode_ref(ctx, side, extern_fqn, &inner_ty, quote! { v })?;
                 quote! { size += #ld_tag_len + ::buffa::types::string_encoded_len(#v_ref) as u32; }
             }
             Type::TYPE_BYTES => {
@@ -2040,17 +2064,18 @@ fn repeated_compute_size_stmt(
                 quote! { size += #elem_tag_len + ::buffa::types::int32_encoded_len(v.to_i32()) as u32; }
             }
             _ => {
-                let v_token = match extern_fqn {
-                    Some(fqn) => {
-                        let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-                        ctx.wrap_extern_encode_value(
-                            fqn,
-                            &inner_ty,
-                            quote! { *v },
-                            quote! { v },
-                        )?
-                    }
-                    None => quote! { *v },
+                let v_token = if ctx.lookup_extern_field_path(extern_fqn).is_some() {
+                    let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                    wrap_encode_value(
+                        ctx,
+                        side,
+                        extern_fqn,
+                        &inner_ty,
+                        quote! { *v },
+                        quote! { v },
+                    )?
+                } else {
+                    quote! { *v }
                 };
                 let size_expr = type_encoded_size_expr(ty, &v_token);
                 quote! { size += #elem_tag_len + #size_expr; }
@@ -2061,7 +2086,7 @@ fn repeated_compute_size_stmt(
         });
     }
     // Packed: single LengthDelimited tag + varint payload length + elements.
-    let payload_expr = repeated_payload_size_expr(ctx, ty, &ident, extern_fqn)?;
+    let payload_expr = repeated_payload_size_expr(ctx, ty, &ident, side, extern_fqn)?;
     Ok(quote! {
         if !self.#ident.is_empty() {
             let payload: u32 = #payload_expr;
@@ -2073,7 +2098,8 @@ fn repeated_compute_size_stmt(
 fn repeated_write_to_stmt(
     ctx: &CodeGenContext,
     field: &FieldDescriptorProto,
-    proto_fqn: Option<&str>,
+    side: EmissionSide,
+    proto_fqn: &str,
     features: &ResolvedFeatures,
 ) -> Result<TokenStream, CodeGenError> {
     let field_name = field
@@ -2083,9 +2109,11 @@ fn repeated_write_to_stmt(
     let field_number = validated_field_number(field)?;
     let ty = effective_type(ctx, field, features);
     let ident = make_field_ident(field_name);
-    // `extern_field_paths` is owned-only; views pass `proto_fqn = None`.
-    let extern_fqn = proto_fqn.map(|p| format!(".{}.{}", p, field_name));
-    let extern_fqn = extern_fqn.as_deref();
+    // `extern_field_paths` applies to both sides. On the owned side
+    // `wrap_encode_ref/value` route through `extern.owned_path`; on the view
+    // side they route through `extern.view_path` (no-op when unset).
+    let extern_fqn = format!(".{proto_fqn}.{field_name}");
+    let extern_fqn: &str = &extern_fqn;
     let resolver = crate::imports::ImportResolver::new();
 
     if ty == Type::TYPE_MESSAGE {
@@ -2121,27 +2149,25 @@ fn repeated_write_to_stmt(
         let per_elem_encode = match ty {
             Type::TYPE_STRING => {
                 let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-                let v_ref = match extern_fqn {
-                    Some(fqn) => ctx.wrap_extern_encode_ref(fqn, &inner_ty, quote! { v })?,
-                    None => quote! { v },
-                };
+                let v_ref = wrap_encode_ref(ctx, side, extern_fqn, &inner_ty, quote! { v })?;
                 quote! { ::buffa::types::encode_string(#v_ref, buf); }
             }
             Type::TYPE_BYTES => quote! { ::buffa::types::encode_bytes(v, buf); },
             Type::TYPE_ENUM => quote! { ::buffa::types::encode_int32(v.to_i32(), buf); },
             _ => {
                 let encode_fn = encode_fn_token(ty);
-                let v_token = match extern_fqn {
-                    Some(fqn) => {
-                        let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-                        ctx.wrap_extern_encode_value(
-                            fqn,
-                            &inner_ty,
-                            quote! { *v },
-                            quote! { v },
-                        )?
-                    }
-                    None => quote! { *v },
+                let v_token = if ctx.lookup_extern_field_path(extern_fqn).is_some() {
+                    let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+                    wrap_encode_value(
+                        ctx,
+                        side,
+                        extern_fqn,
+                        &inner_ty,
+                        quote! { *v },
+                        quote! { v },
+                    )?
+                } else {
+                    quote! { *v }
                 };
                 quote! { #encode_fn(#v_token, buf); }
             }
@@ -2154,7 +2180,7 @@ fn repeated_write_to_stmt(
         });
     }
     // Packed.
-    let payload_expr = repeated_payload_size_expr(ctx, ty, &ident, extern_fqn)?;
+    let payload_expr = repeated_payload_size_expr(ctx, ty, &ident, side, extern_fqn)?;
     let encode_loop = if ty == Type::TYPE_ENUM {
         quote! { for v in &self.#ident { ::buffa::types::encode_int32(v.to_i32(), buf); } }
     } else {
@@ -2163,18 +2189,19 @@ fn repeated_write_to_stmt(
         // through the explicit-trait `AsRef` deref. The unswapped path keeps
         // the existing `for &v in &self.#ident` destructuring (T: Copy) so the
         // emit is byte-identical when no extern entry matches.
-        match extern_fqn.filter(|fqn| ctx.lookup_extern_field_path(fqn).is_some()) {
-            Some(fqn) => {
-                let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
-                let v_token = ctx.wrap_extern_encode_value(
-                    fqn,
-                    &inner_ty,
-                    quote! { *v },
-                    quote! { v },
-                )?;
-                quote! { for v in &self.#ident { #encode_fn(#v_token, buf); } }
-            }
-            None => quote! { for &v in &self.#ident { #encode_fn(v, buf); } },
+        if ctx.lookup_extern_field_path(extern_fqn).is_some() {
+            let inner_ty = crate::message::scalar_rust_type(ty, &resolver)?;
+            let v_token = wrap_encode_value(
+                ctx,
+                side,
+                extern_fqn,
+                &inner_ty,
+                quote! { *v },
+                quote! { v },
+            )?;
+            quote! { for v in &self.#ident { #encode_fn(#v_token, buf); } }
+        } else {
+            quote! { for &v in &self.#ident { #encode_fn(v, buf); } }
         }
     };
     Ok(quote! {

@@ -983,3 +983,47 @@ fn view_string_extern_encode_wraps_through_view_as_ref() {
         "view write_to must wrap view-typed extern operand via AsRef<str>: {content}"
     );
 }
+
+/// Repeated string extern fields must wrap each element in the encode loop
+/// on both the owned and the view side.
+#[test]
+fn repeated_string_extern_encode_wraps_loop_body() {
+    let mut file = proto3_file("ext_rep_encode.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("items", 1, Label::LABEL_REPEATED, Type::TYPE_STRING)],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![
+            ExternFieldPath::new(".Msg.items", "crate::wrap::Item")
+                .with_view_path("crate::wrap::ItemRef"),
+        ],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_rep_encode.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    // Owned side: encode loop iterates over Vec<Item>; per-element wrap is
+    // <Item as AsRef<String>>::as_ref(v) (owned brand owns its String).
+    assert!(
+        contains_normalized(
+            &content,
+            "<crate::wrap::Item as ::core::convert::AsRef<::buffa::alloc::string::String>>::as_ref"
+        ),
+        "owned repeated encode must wrap each element via Item AsRef<String>: {content}"
+    );
+    // View side: encode loop iterates over RepeatedView<ItemRef>; per-element
+    // wrap is <ItemRef as AsRef<str>>::as_ref(v) (borrowed view never owns
+    // a String — see Task 4 docs for the contract reasoning).
+    assert!(
+        contains_normalized(
+            &content,
+            "<crate::wrap::ItemRef as ::core::convert::AsRef<str>>::as_ref"
+        ),
+        "view repeated encode must wrap each element via ItemRef AsRef<str>: {content}"
+    );
+}
