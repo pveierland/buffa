@@ -137,7 +137,8 @@ fn contains_normalized(content: &str, needle: &str) -> bool {
                 .replace(" >", ">")
                 .replace(" )", ")")
                 .replace("( ", "(")
-                .replace("< ", "<");
+                .replace("< ", "<")
+                .replace(" .", ".");
         }
         cur
     }
@@ -264,11 +265,13 @@ fn owned_implicit_presence_numeric_extern_wraps_default_check() {
     let content = joined(&files);
 
     // The non-default check must compare the wrapped *inner* value, not the
-    // wrapper directly. Look for the AsRef-deref form on the LHS of the != .
+    // wrapper directly. Look for the AsRef-deref form on the LHS of the !=.
+    // `is_non_default_expr` paren-wraps the value expression so the deref
+    // binds against the whole sub-expression — see its doc-comment.
     assert!(
         contains_normalized(
             &content,
-            "*<crate::wrap::Idx as ::core::convert::AsRef<u32>>::as_ref(&self.idx) != 0u32"
+            "(*<crate::wrap::Idx as ::core::convert::AsRef<u32>>::as_ref(&self.idx)) != 0u32"
         ),
         "implicit-presence numeric default check must wrap the value: {content}"
     );
@@ -776,7 +779,7 @@ fn text_format_implicit_presence_numeric_extern_wraps_value() {
     assert!(
         contains_normalized(
             &content,
-            "*<crate::wrap::Idx as ::core::convert::AsRef<u32>>::as_ref(&self.idx) != 0u32"
+            "(*<crate::wrap::Idx as ::core::convert::AsRef<u32>>::as_ref(&self.idx)) != 0u32"
         ),
         "text non-default check must wrap numeric extern operand: {content}"
     );
@@ -1317,6 +1320,97 @@ fn view_struct_with_extern_view_path_emits_explicit_default_impl() {
     assert!(
         !contains_normalized(&content, "#[derive(Clone, Debug, Default)]"),
         "view struct with extern view-path field must NOT derive Default: {content}"
+    );
+}
+
+/// Implicit-presence `double` extern field: the encode/size codegen wraps
+/// the value via `*<Owned as AsRef<f64>>::as_ref(...)`, then composes the
+/// `is_non_default_expr` predicate around it as `(...).to_bits() != 0u64`.
+/// Without the parens, the unary `*` would bind *outside* `.to_bits()`
+/// (method-call has higher precedence) and the generated source would try
+/// to deref a `u64`, producing an E0614 in downstream crates. This test
+/// pins the parenthesized shape so a regression in `is_non_default_expr`
+/// is caught at codegen-test time rather than only at downstream-build
+/// time.
+#[test]
+fn owned_double_extern_is_non_default_check_parens_through_to_bits() {
+    let mut file = proto3_file("ext_double.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("ts", 1, Label::LABEL_OPTIONAL, Type::TYPE_DOUBLE)],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: false,
+        extern_field_paths: vec![ExternFieldPath::new(".Msg.ts", "crate::wrap::F64Brand")],
+        ..CodeGenConfig::default()
+    };
+    let files =
+        generate(&[file], &["ext_double.proto".to_string()], &config).expect("should generate");
+    let content = joined(&files);
+
+    // The deref-as-ref expression must be parenthesized so `.to_bits()`
+    // applies to the dereferenced `f64`, not to its post-deref method-call
+    // result. Two assertions: (1) the AsRef<f64> form is present, (2) it
+    // sits inside `(...)` immediately followed by `.to_bits()` (potentially
+    // across a prettyplease-injected line break).
+    assert!(
+        contains_normalized(
+            &content,
+            "(*<crate::wrap::F64Brand as ::core::convert::AsRef<f64>>::as_ref(&self.ts))"
+        ),
+        "double extern is_non_default check must paren-wrap the deref: {content}"
+    );
+    assert!(
+        contains_normalized(&content, ").to_bits() != 0u64"),
+        "double extern is_non_default check must follow the close-paren with `.to_bits() != 0u64`: {content}"
+    );
+
+    // The unparenthesized form (the regressed shape — `.to_bits()` directly
+    // after `as_ref(...)` with no `)` in between) must not appear.
+    assert!(
+        !contains_normalized(
+            &content,
+            "::as_ref(&self.ts).to_bits()"
+        ),
+        "double extern must not emit `as_ref(...).to_bits()` directly (parses as `*u64`): {content}"
+    );
+}
+
+/// Float counterpart of [`owned_double_extern_is_non_default_check_parens_through_to_bits`].
+#[test]
+fn owned_float_extern_is_non_default_check_parens_through_to_bits() {
+    let mut file = proto3_file("ext_float.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![make_field("ratio", 1, Label::LABEL_OPTIONAL, Type::TYPE_FLOAT)],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: false,
+        extern_field_paths: vec![ExternFieldPath::new(".Msg.ratio", "crate::wrap::F32Brand")],
+        ..CodeGenConfig::default()
+    };
+    let files =
+        generate(&[file], &["ext_float.proto".to_string()], &config).expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        contains_normalized(
+            &content,
+            "(*<crate::wrap::F32Brand as ::core::convert::AsRef<f32>>::as_ref(&self.ratio))"
+        ),
+        "float extern is_non_default check must paren-wrap the deref: {content}"
+    );
+    assert!(
+        contains_normalized(&content, ").to_bits() != 0u32"),
+        "float extern is_non_default check must follow the close-paren with `.to_bits() != 0u32`: {content}"
+    );
+    assert!(
+        !contains_normalized(&content, "::as_ref(&self.ratio).to_bits()"),
+        "float extern must not emit `as_ref(...).to_bits()` directly (parses as `*u32`): {content}"
     );
 }
 

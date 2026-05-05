@@ -109,7 +109,7 @@ impl<'a> ::buffa::ViewEncode<'a> for DoubleValueView<'a> {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.value.to_bits() != 0u64 {
+        if (self.value).to_bits() != 0u64 {
             size += 1u32 + ::buffa::types::FIXED64_ENCODED_LEN as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -123,7 +123,7 @@ impl<'a> ::buffa::ViewEncode<'a> for DoubleValueView<'a> {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value.to_bits() != 0u64 {
+        if (self.value).to_bits() != 0u64 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Fixed64)
                 .encode(buf);
             ::buffa::types::encode_double(self.value, buf);
@@ -251,7 +251,7 @@ impl<'a> ::buffa::ViewEncode<'a> for FloatValueView<'a> {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.value.to_bits() != 0u32 {
+        if (self.value).to_bits() != 0u32 {
             size += 1u32 + ::buffa::types::FIXED32_ENCODED_LEN as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -265,7 +265,7 @@ impl<'a> ::buffa::ViewEncode<'a> for FloatValueView<'a> {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value.to_bits() != 0u32 {
+        if (self.value).to_bits() != 0u32 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Fixed32)
                 .encode(buf);
             ::buffa::types::encode_float(self.value, buf);
@@ -393,7 +393,7 @@ impl<'a> ::buffa::ViewEncode<'a> for Int64ValueView<'a> {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.value != 0i64 {
+        if (self.value) != 0i64 {
             size += 1u32 + ::buffa::types::int64_encoded_len(self.value) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -407,7 +407,7 @@ impl<'a> ::buffa::ViewEncode<'a> for Int64ValueView<'a> {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value != 0i64 {
+        if (self.value) != 0i64 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_int64(self.value, buf);
@@ -535,7 +535,7 @@ impl<'a> ::buffa::ViewEncode<'a> for UInt64ValueView<'a> {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.value != 0u64 {
+        if (self.value) != 0u64 {
             size += 1u32 + ::buffa::types::uint64_encoded_len(self.value) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -549,7 +549,7 @@ impl<'a> ::buffa::ViewEncode<'a> for UInt64ValueView<'a> {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value != 0u64 {
+        if (self.value) != 0u64 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_uint64(self.value, buf);
@@ -677,7 +677,7 @@ impl<'a> ::buffa::ViewEncode<'a> for Int32ValueView<'a> {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.value != 0i32 {
+        if (self.value) != 0i32 {
             size += 1u32 + ::buffa::types::int32_encoded_len(self.value) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -691,7 +691,7 @@ impl<'a> ::buffa::ViewEncode<'a> for Int32ValueView<'a> {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value != 0i32 {
+        if (self.value) != 0i32 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_int32(self.value, buf);
@@ -819,7 +819,7 @@ impl<'a> ::buffa::ViewEncode<'a> for UInt32ValueView<'a> {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.value != 0u32 {
+        if (self.value) != 0u32 {
             size += 1u32 + ::buffa::types::uint32_encoded_len(self.value) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -833,7 +833,7 @@ impl<'a> ::buffa::ViewEncode<'a> for UInt32ValueView<'a> {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value != 0u32 {
+        if (self.value) != 0u32 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_uint32(self.value, buf);

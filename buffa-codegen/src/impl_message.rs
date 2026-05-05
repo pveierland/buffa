@@ -1125,22 +1125,36 @@ pub(crate) fn decode_fn_token(ty: Type) -> TokenStream {
 /// would have emitted — `i32`, `u32`, `f32`, `bool`, ...). For extern-wrapped
 /// fields, callers pass the explicit-trait `*<Owned as AsRef<Inner>>::as_ref(...)`
 /// form so the comparison still resolves against the inner scalar type.
+///
+/// Every branch paren-wraps `#value_expr`. Today only the float/double
+/// branches strictly need it — they post-fix `.to_bits()`, and method-call
+/// binds *tighter* than unary `*`, so `*expr.to_bits()` would otherwise parse
+/// as `*(expr.to_bits())` and try to deref a `u64`/`u32`. The integer and
+/// bool branches are safe with current callers because `!=` has lower
+/// precedence than the deref expressions they pass in, but wrapping every
+/// branch keeps this function robust against any future change in what
+/// callers thread through as `value_expr`.
 pub(crate) fn is_non_default_expr(ty: Type, value_expr: &TokenStream) -> TokenStream {
     match ty {
         Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => {
-            quote! { #value_expr != 0i32 }
+            quote! { (#value_expr) != 0i32 }
         }
         Type::TYPE_INT64 | Type::TYPE_SINT64 | Type::TYPE_SFIXED64 => {
-            quote! { #value_expr != 0i64 }
+            quote! { (#value_expr) != 0i64 }
         }
-        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => quote! { #value_expr != 0u32 },
-        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => quote! { #value_expr != 0u64 },
+        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => quote! { (#value_expr) != 0u32 },
+        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => quote! { (#value_expr) != 0u64 },
         // Float presence is by bit pattern: `to_bits() != 0` is true for NaN
         // (serialized) and for -0.0 (also serialized — the proto3 spec treats
         // only IEEE +0.0 as the default, and the conformance suite checks
         // that -0.0 round-trips through an implicit-presence field).
-        Type::TYPE_FLOAT => quote! { #value_expr.to_bits() != 0u32 },
-        Type::TYPE_DOUBLE => quote! { #value_expr.to_bits() != 0u64 },
+        Type::TYPE_FLOAT => quote! { (#value_expr).to_bits() != 0u32 },
+        Type::TYPE_DOUBLE => quote! { (#value_expr).to_bits() != 0u64 },
+        // Bool is consumed directly as an `if`-condition by the call sites,
+        // so wrapping it in parens would trigger `unused_parens` for every
+        // bool field downstream. The integer/float branches sit on either
+        // side of `!=` / before `.to_bits()`, where the parens disappear
+        // after parsing without provoking a lint.
         Type::TYPE_BOOL => quote! { #value_expr },
         _ => unreachable!("is_non_default_expr called for non-numeric type {:?}", ty),
     }

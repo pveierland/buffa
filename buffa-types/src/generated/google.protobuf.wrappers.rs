@@ -43,7 +43,7 @@ impl ::buffa::Message for DoubleValue {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.value.to_bits() != 0u64 {
+        if (self.value).to_bits() != 0u64 {
             size += 1u32 + ::buffa::types::FIXED64_ENCODED_LEN as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -56,7 +56,7 @@ impl ::buffa::Message for DoubleValue {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value.to_bits() != 0u64 {
+        if (self.value).to_bits() != 0u64 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Fixed64)
                 .encode(buf);
             ::buffa::types::encode_double(self.value, buf);
@@ -112,7 +112,7 @@ impl ::buffa::text::TextFormat for DoubleValue {
     ) -> ::core::fmt::Result {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value.to_bits() != 0u64 {
+        if (self.value).to_bits() != 0u64 {
             enc.write_field_name("value")?;
             enc.write_f64(self.value)?;
         }
@@ -182,7 +182,7 @@ impl ::buffa::Message for FloatValue {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.value.to_bits() != 0u32 {
+        if (self.value).to_bits() != 0u32 {
             size += 1u32 + ::buffa::types::FIXED32_ENCODED_LEN as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -195,7 +195,7 @@ impl ::buffa::Message for FloatValue {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value.to_bits() != 0u32 {
+        if (self.value).to_bits() != 0u32 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Fixed32)
                 .encode(buf);
             ::buffa::types::encode_float(self.value, buf);
@@ -251,7 +251,7 @@ impl ::buffa::text::TextFormat for FloatValue {
     ) -> ::core::fmt::Result {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value.to_bits() != 0u32 {
+        if (self.value).to_bits() != 0u32 {
             enc.write_field_name("value")?;
             enc.write_f32(self.value)?;
         }
@@ -321,7 +321,7 @@ impl ::buffa::Message for Int64Value {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.value != 0i64 {
+        if (self.value) != 0i64 {
             size += 1u32 + ::buffa::types::int64_encoded_len(self.value) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -334,7 +334,7 @@ impl ::buffa::Message for Int64Value {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value != 0i64 {
+        if (self.value) != 0i64 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_int64(self.value, buf);
@@ -390,7 +390,7 @@ impl ::buffa::text::TextFormat for Int64Value {
     ) -> ::core::fmt::Result {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value != 0i64 {
+        if (self.value) != 0i64 {
             enc.write_field_name("value")?;
             enc.write_i64(self.value)?;
         }
@@ -460,7 +460,7 @@ impl ::buffa::Message for UInt64Value {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.value != 0u64 {
+        if (self.value) != 0u64 {
             size += 1u32 + ::buffa::types::uint64_encoded_len(self.value) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -473,7 +473,7 @@ impl ::buffa::Message for UInt64Value {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value != 0u64 {
+        if (self.value) != 0u64 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_uint64(self.value, buf);
@@ -529,7 +529,7 @@ impl ::buffa::text::TextFormat for UInt64Value {
     ) -> ::core::fmt::Result {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value != 0u64 {
+        if (self.value) != 0u64 {
             enc.write_field_name("value")?;
             enc.write_u64(self.value)?;
         }
@@ -599,7 +599,7 @@ impl ::buffa::Message for Int32Value {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.value != 0i32 {
+        if (self.value) != 0i32 {
             size += 1u32 + ::buffa::types::int32_encoded_len(self.value) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -612,7 +612,7 @@ impl ::buffa::Message for Int32Value {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value != 0i32 {
+        if (self.value) != 0i32 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_int32(self.value, buf);
@@ -668,7 +668,7 @@ impl ::buffa::text::TextFormat for Int32Value {
     ) -> ::core::fmt::Result {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value != 0i32 {
+        if (self.value) != 0i32 {
             enc.write_field_name("value")?;
             enc.write_i32(self.value)?;
         }
@@ -738,7 +738,7 @@ impl ::buffa::Message for UInt32Value {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.value != 0u32 {
+        if (self.value) != 0u32 {
             size += 1u32 + ::buffa::types::uint32_encoded_len(self.value) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -751,7 +751,7 @@ impl ::buffa::Message for UInt32Value {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value != 0u32 {
+        if (self.value) != 0u32 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_uint32(self.value, buf);
@@ -807,7 +807,7 @@ impl ::buffa::text::TextFormat for UInt32Value {
     ) -> ::core::fmt::Result {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.value != 0u32 {
+        if (self.value) != 0u32 {
             enc.write_field_name("value")?;
             enc.write_u32(self.value)?;
         }

@@ -153,10 +153,10 @@ impl ::buffa::Message for Timestamp {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.seconds != 0i64 {
+        if (self.seconds) != 0i64 {
             size += 1u32 + ::buffa::types::int64_encoded_len(self.seconds) as u32;
         }
-        if self.nanos != 0i32 {
+        if (self.nanos) != 0i32 {
             size += 1u32 + ::buffa::types::int32_encoded_len(self.nanos) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -169,12 +169,12 @@ impl ::buffa::Message for Timestamp {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.seconds != 0i64 {
+        if (self.seconds) != 0i64 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_int64(self.seconds, buf);
         }
-        if self.nanos != 0i32 {
+        if (self.nanos) != 0i32 {
             ::buffa::encoding::Tag::new(2u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_int32(self.nanos, buf);
@@ -241,11 +241,11 @@ impl ::buffa::text::TextFormat for Timestamp {
     ) -> ::core::fmt::Result {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.seconds != 0i64 {
+        if (self.seconds) != 0i64 {
             enc.write_field_name("seconds")?;
             enc.write_i64(self.seconds)?;
         }
-        if self.nanos != 0i32 {
+        if (self.nanos) != 0i32 {
             enc.write_field_name("nanos")?;
             enc.write_i32(self.nanos)?;
         }
