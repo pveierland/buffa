@@ -314,15 +314,20 @@ pub fn generate_oneof_enum(
 /// Return the path to the serde helper module for a field type,
 /// or `None` if the type uses default serde serialization.
 ///
-/// When `is_extern` is `true`, numeric types route through the `*_extern`
+/// When `is_extern` is `true`, the helper routes through the `*_extern`
 /// variant whose `serialize`/`deserialize` functions are generic over
 /// `T: AsRef<Inner>` / `T: From<Inner>` so they compile against a brand
-/// wrapper rather than the raw primitive.  String and bytes types are
-/// unaffected: strings are handled via `#[serde(transparent)]`/`with =`
-/// attributes on the struct field rather than here, and `TYPE_BYTES` extern
-/// entries are rejected at validation time.
+/// wrapper rather than the raw primitive. `TYPE_STRING` returns the
+/// `proto_string_extern` adapter only when `is_extern` is set; in the
+/// non-oneof path strings flow through `#[serde(transparent)]` and never
+/// reach this dispatch, but oneof variants must route every serialize /
+/// deserialize through a helper because the variant payload is wrapped in
+/// the synthesized `_W` / `_DeserSeed` newtypes (which don't carry serde
+/// attributes). `TYPE_BYTES` extern entries are rejected at validation
+/// time, so the `is_extern` arm collapses to the same bare `bytes` shim.
 pub(crate) fn serde_helper_path(field_type: Type, is_extern: bool) -> Option<TokenStream> {
     match field_type {
+        Type::TYPE_STRING => is_extern.then(|| quote! { ::buffa::json_helpers::proto_string_extern }),
         Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => Some(if is_extern {
             quote! { ::buffa::json_helpers::int32_extern }
         } else {
@@ -354,8 +359,15 @@ pub(crate) fn serde_helper_path(field_type: Type, is_extern: bool) -> Option<Tok
             quote! { ::buffa::json_helpers::double }
         }),
         // bytes has only one shim; extern entries on TYPE_BYTES are rejected
-        // at validation time anyway.
-        Type::TYPE_BYTES => Some(quote! { ::buffa::json_helpers::bytes }),
+        // at validation time anyway, so `is_extern` cannot reach this arm
+        // for a real extern entry.
+        Type::TYPE_BYTES => {
+            debug_assert!(
+                !is_extern,
+                "extern entries on TYPE_BYTES must be rejected by the validator",
+            );
+            Some(quote! { ::buffa::json_helpers::bytes })
+        }
         _ => None,
     }
 }

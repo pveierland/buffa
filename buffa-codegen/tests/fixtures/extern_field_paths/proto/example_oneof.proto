@@ -1,0 +1,13 @@
+syntax = "proto3";
+package example_oneof;
+
+// Two oneof variants — one string, one numeric — both with extern brands.
+// Exercises the binary, JSON, view, and view→owned paths for branded
+// oneof variants. The FQN convention is `.{message}.{variant}` (omitting
+// the oneof name), per `extern_field_paths` docs.
+message Msg {
+    oneof kind {
+        string subpath = 1;
+        uint32 index = 2;
+    }
+}

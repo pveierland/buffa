@@ -14,6 +14,7 @@ members = [
     "buffa-codegen/tests/fixtures/extern_field_paths/corner_b",
     "buffa-codegen/tests/fixtures/extern_field_paths/corner_c",
     "buffa-codegen/tests/fixtures/extern_field_paths/corner_d",
+    "buffa-codegen/tests/fixtures/extern_field_paths/corner_oneof",
 ]
 exclude = [
     "benchmarks/gen-datasets",

@@ -342,6 +342,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ext_corner_oneof"
+version = "0.0.0"
+dependencies = [
+ "buffa",
+ "buffa-build",
+ "extern_brand",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "extern_brand"
 version = "0.0.0"
 

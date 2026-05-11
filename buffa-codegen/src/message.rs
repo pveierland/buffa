@@ -984,20 +984,32 @@ fn custom_deser_oneof_group(
         let json_name = field.json_name.as_deref().unwrap_or(proto_name);
         let variant_ident = crate::oneof::oneof_variant_ident(proto_name);
         let field_type = crate::impl_message::effective_type(ctx, field, features);
-        // bytes_fields override: feeds #variant_type into the _DeserSeed
-        // return type, which pins the generic T in json_helpers::bytes::
-        // deserialize to Bytes (vs the Vec<u8> default). No downstream
-        // shim needed — the helper is generic over T: From<Vec<u8>>.
+
+        let variant_field_fqn = format!(".{proto_fqn}.{proto_name}");
+        let extern_entry = ctx.lookup_extern_field_path(&variant_field_fqn);
+        // Pin the helper return type to whatever the oneof enum variant
+        // actually carries. Three overrides, in priority order:
+        //   1. bytes_fields → ::buffa::bytes::Bytes (helper is generic over
+        //      `T: From<Vec<u8>>`).
+        //   2. extern_field_paths on an eligible string/numeric variant →
+        //      the brand owned path (helpers are generic over
+        //      `T: From<Inner>` / `T: AsRef<Inner>`).
+        //   3. fallback → the scalar/message type from descriptor walking.
+        let is_extern_eligible = matches!(field_type, Type::TYPE_STRING)
+            || crate::impl_text::is_extern_eligible_numeric(field_type);
         let variant_type = if field_type == Type::TYPE_BYTES
             && crate::impl_message::field_uses_bytes(ctx, proto_fqn, proto_name)
         {
             quote! { ::buffa::bytes::Bytes }
+        } else if let (true, Some(entry)) = (is_extern_eligible, extern_entry) {
+            let owned_ty: syn::Type = syn::parse_str(&entry.owned_path)
+                .map_err(|_| CodeGenError::InvalidTypePath(entry.owned_path.clone()))?;
+            quote! { #owned_ty }
         } else {
             scalar_or_message_type_nested(ctx, field, current_package, nesting, features, resolver)?
         };
 
-        let variant_field_fqn = format!(".{proto_fqn}.{proto_name}");
-        let is_extern = ctx.lookup_extern_field_path(&variant_field_fqn).is_some();
+        let is_extern = extern_entry.is_some();
 
         let qualified_enum: TokenStream = quote! { #oneof_prefix #enum_ident };
         let arm = crate::oneof::oneof_variant_deser_arm(&crate::oneof::OneofVariantDeserInput {
