@@ -819,8 +819,22 @@ fn generate_oneof_view_enum(
             let variant = crate::oneof::oneof_variant_ident(name);
             let ty = effective_type(ctx, f, features);
             let f_features = crate::features::resolve_field(ctx, f, features);
+            let variant_field_fqn = format!(".{}.{}", scope.proto_fqn, name);
             let vty = match ty {
-                Type::TYPE_STRING => quote! { &'a str },
+                Type::TYPE_STRING => {
+                    let view_path_opt = ctx
+                        .lookup_extern_field_path(&variant_field_fqn)
+                        .and_then(|e| e.view_path.as_deref());
+                    match view_path_opt {
+                        Some(view_path) => {
+                            let view_ty: syn::Type = syn::parse_str(view_path).map_err(|_| {
+                                CodeGenError::InvalidTypePath(view_path.to_string())
+                            })?;
+                            quote! { #view_ty<'a> }
+                        }
+                        None => quote! { &'a str },
+                    }
+                }
                 Type::TYPE_BYTES => quote! { &'a [u8] },
                 Type::TYPE_MESSAGE | Type::TYPE_GROUP => {
                     let view_ty = resolve_view_ty_tokens(body_scope, f)?;
@@ -1495,7 +1509,7 @@ fn build_to_owned_fields(
                     .ok_or(CodeGenError::MissingField("field.name"))?;
                 let variant = crate::oneof::oneof_variant_ident(fname);
                 let ty = effective_type(ctx, f, features);
-                let conv = oneof_variant_to_owned(scope, ty, fname);
+                let conv = oneof_variant_to_owned(scope, ty, fname)?;
                 Ok(quote! {
                     #view_enum::#variant(v) => #owned_enum::#variant(#conv),
                 })
@@ -1717,16 +1731,30 @@ fn map_to_owned_expr(
     })
 }
 
-fn oneof_variant_to_owned(scope: MessageScope<'_>, ty: Type, field_name: &str) -> TokenStream {
+fn oneof_variant_to_owned(
+    scope: MessageScope<'_>,
+    ty: Type,
+    field_name: &str,
+) -> Result<TokenStream, CodeGenError> {
     let MessageScope { ctx, proto_fqn, .. } = scope;
     match ty {
-        Type::TYPE_STRING => quote! { v.to_string() },
-        // match-ergonomics on &ViewEnum → v: &&[u8]. bytes_to_owned handles it.
-        Type::TYPE_BYTES => bytes_to_owned(ctx, proto_fqn, field_name, quote! { v }),
-        Type::TYPE_MESSAGE | Type::TYPE_GROUP => {
-            quote! { ::buffa::alloc::boxed::Box::new(v.to_owned_from_source(__buffa_src)) }
+        Type::TYPE_STRING => {
+            let field_fqn = format!(".{proto_fqn}.{field_name}");
+            // When view_path is set the variant body is BrandRef<'a>, not &'a str.
+            // v.to_string() would require Display; use wrap_extern_view_to_owned
+            // which emits the correct From<&BrandRef> / From<&str> / .to_string() path.
+            if ctx.lookup_extern_field_path(&field_fqn).is_some() {
+                ctx.wrap_extern_view_to_owned(&field_fqn, quote! { v })
+            } else {
+                Ok(quote! { v.to_string() })
+            }
         }
-        _ => quote! { *v },
+        // match-ergonomics on &ViewEnum → v: &&[u8]. bytes_to_owned handles it.
+        Type::TYPE_BYTES => Ok(bytes_to_owned(ctx, proto_fqn, field_name, quote! { v })),
+        Type::TYPE_MESSAGE | Type::TYPE_GROUP => Ok(
+            quote! { ::buffa::alloc::boxed::Box::new(v.to_owned_from_source(__buffa_src)) },
+        ),
+        _ => Ok(quote! { *v }),
     }
 }
 

@@ -769,23 +769,30 @@ pub(crate) fn build_view_encode_methods(
                 for field in fields {
                     let field_number = validated_field_number(field)?;
                     let ty = effective_type(ctx, field, features);
-                    let variant = crate::oneof::oneof_variant_ident(
-                        field
-                            .name
-                            .as_deref()
-                            .ok_or(CodeGenError::MissingField("field.name"))?,
-                    );
+                    let field_name = field
+                        .name
+                        .as_deref()
+                        .ok_or(CodeGenError::MissingField("field.name"))?;
+                    let variant = crate::oneof::oneof_variant_ident(field_name);
                     let tag_len = tag_encoded_len(field_number, wire_type_byte(ty));
                     let wire_type = wire_type_token(ty);
-                    // View-side oneof arms: pass an empty FQN so that no
-                    // extern_field_paths lookup matches. View-side extern
-                    // wrapping for oneofs is not yet implemented; the view
-                    // variant payloads are raw borrowed types (&str, etc.)
-                    // that don't need the owned AsRef<String> projection.
-                    size_arms.push(oneof_size_arm(ctx, "", &qualified, &variant, tag_len, ty)?);
+                    // View-side oneof arms: pass the actual FQN and EmissionSide::View
+                    // so that string variants with view_path get projected through
+                    // <ViewBrand as AsRef<str>>::as_ref(x) rather than a bare x: &str.
+                    let variant_field_fqn = format!(".{proto_fqn}.{field_name}");
+                    size_arms.push(oneof_size_arm(
+                        ctx,
+                        EmissionSide::View,
+                        &variant_field_fqn,
+                        &qualified,
+                        &variant,
+                        tag_len,
+                        ty,
+                    )?);
                     write_arms.push(oneof_write_arm(
                         ctx,
-                        "",
+                        EmissionSide::View,
+                        &variant_field_fqn,
                         &qualified,
                         &variant,
                         field_number,
@@ -2489,6 +2496,7 @@ fn repeated_merge_arm(
 /// Emits `EnumIdent::VariantIdent(x) => { size += tag_len + encoded_len; }`.
 fn oneof_size_arm(
     ctx: &CodeGenContext,
+    side: EmissionSide,
     variant_field_fqn: &str,
     enum_ident: &TokenStream,
     variant_ident: &Ident,
@@ -2497,7 +2505,9 @@ fn oneof_size_arm(
 ) -> Result<TokenStream, CodeGenError> {
     match ty {
         Type::TYPE_STRING => {
-            let arg = ctx.wrap_extern_encode_ref(
+            let arg = wrap_encode_ref(
+                ctx,
+                side,
                 variant_field_fqn,
                 &quote! { ::buffa::alloc::string::String },
                 quote! { x },
@@ -2555,7 +2565,9 @@ fn oneof_size_arm(
             // so the variant binding v: &T must be dereferenced.
             if crate::impl_text::is_extern_eligible_numeric(ty) {
                 let inner = crate::impl_text::extern_inner_ty(ty);
-                let arg = ctx.wrap_extern_encode_value(
+                let arg = wrap_encode_value(
+                    ctx,
+                    side,
                     variant_field_fqn,
                     &inner,
                     quote! { *v },
@@ -2583,8 +2595,10 @@ fn oneof_size_arm(
 /// Generate a `write_to` match arm for one oneof variant.
 ///
 /// Emits `EnumIdent::VariantIdent(x) => { Tag::new(...).encode(buf); encode_*(x, buf); }`.
+#[allow(clippy::too_many_arguments)]
 fn oneof_write_arm(
     ctx: &CodeGenContext,
+    side: EmissionSide,
     variant_field_fqn: &str,
     enum_ident: &TokenStream,
     variant_ident: &Ident,
@@ -2594,7 +2608,9 @@ fn oneof_write_arm(
 ) -> Result<TokenStream, CodeGenError> {
     match ty {
         Type::TYPE_STRING => {
-            let arg = ctx.wrap_extern_encode_ref(
+            let arg = wrap_encode_ref(
+                ctx,
+                side,
                 variant_field_fqn,
                 &quote! { ::buffa::alloc::string::String },
                 quote! { x },
@@ -2648,7 +2664,9 @@ fn oneof_write_arm(
             let encode_fn = encode_fn_token(ty);
             let arg = if crate::impl_text::is_extern_eligible_numeric(ty) {
                 let inner = crate::impl_text::extern_inner_ty(ty);
-                ctx.wrap_extern_encode_value(
+                wrap_encode_value(
+                    ctx,
+                    side,
                     variant_field_fqn,
                     &inner,
                     quote! { *x },
@@ -2850,6 +2868,7 @@ fn generate_oneof_impls(
 
         size_arms.push(oneof_size_arm(
             ctx,
+            EmissionSide::Owned,
             &variant_field_fqn,
             &qualified_enum,
             &variant_ident,
@@ -2858,6 +2877,7 @@ fn generate_oneof_impls(
         )?);
         write_arms.push(oneof_write_arm(
             ctx,
+            EmissionSide::Owned,
             &variant_field_fqn,
             &qualified_enum,
             &variant_ident,

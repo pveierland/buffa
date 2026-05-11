@@ -1527,3 +1527,57 @@ fn view_path_with_lifetime_is_rejected() {
         "error should mention the bare-path requirement: {msg}"
     );
 }
+
+#[test]
+fn extern_field_view_path_applies_to_string_oneof_variant() {
+    let mut file = proto3_file("ext_oneof_str_view.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("subpath".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_STRING),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("kind".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![ExternFieldPath::new(".Msg.subpath", "crate::wrap::Subpath")
+            .with_view_path("crate::wrap::SubpathRef")],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_oneof_str_view.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        content.contains("Subpath(crate::wrap::SubpathRef<'a>)"),
+        "view oneof variant body must carry the view brand with lifetime: {content}"
+    );
+
+    // View-side binary encode must wrap the brand projection via AsRef<str>.
+    assert!(
+        contains_normalized(
+            &content,
+            "<crate::wrap::SubpathRef as ::core::convert::AsRef<str>>::as_ref"
+        ),
+        "view oneof encode must project brand via AsRef<str>: {content}"
+    );
+
+    // to_owned_message for the oneof variant must convert via From<&BrandRef>.
+    assert!(
+        contains_normalized(
+            &content,
+            "<crate::wrap::Subpath as ::core::convert::From<&crate::wrap::SubpathRef<'_>>>::from"
+        ),
+        "view oneof to_owned must convert via From<&BrandRef>: {content}"
+    );
+}
