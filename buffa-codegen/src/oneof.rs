@@ -105,6 +105,10 @@ fn collect_variant_info(
             let json_name = field.json_name.as_deref().unwrap_or(proto_name).to_string();
             let variant_ident = oneof_variant_ident(proto_name);
             let field_type = crate::impl_message::effective_type(ctx, field, features);
+
+            let variant_field_fqn = format!(".{proto_fqn}.{proto_name}");
+            let extern_entry = ctx.lookup_extern_field_path(&variant_field_fqn);
+
             // bytes_fields config override: scalar_or_message_type_nested goes
             // through scalar_rust_type which hardcodes Vec<u8> for TYPE_BYTES.
             // Encode/size/JSON-serialize all take &[u8] so Bytes deref-coerces
@@ -116,7 +120,7 @@ fn collect_variant_info(
             // (sentinel + `oneof` + one snake-case segment per message in
             // the FQN path). `nesting` here is the owning message's
             // msg_nesting, so the enum body sits at `nesting + 3`.
-            let rust_type =
+            let scalar =
                 if field_type == Type::TYPE_BYTES && field_uses_bytes(ctx, proto_fqn, proto_name) {
                     quote! { ::buffa::bytes::Bytes }
                 } else {
@@ -129,6 +133,22 @@ fn collect_variant_info(
                         resolver,
                     )?
                 };
+
+            // Eligibility mirrors the non-oneof path: string + numeric scalars only.
+            // The validator in `lib.rs` is the single source of truth for rejection;
+            // this `matches!` is defense-in-depth against a config slipping through.
+            let is_extern_eligible = matches!(field_type, Type::TYPE_STRING)
+                || crate::impl_text::is_extern_eligible_numeric(field_type);
+
+            let (rust_type, extern_entry_cached) = match (is_extern_eligible, extern_entry) {
+                (true, Some(entry)) => {
+                    let owned_ty: syn::Type = syn::parse_str(&entry.owned_path)
+                        .map_err(|_| CodeGenError::InvalidTypePath(entry.owned_path.clone()))?;
+                    (quote! { #owned_ty }, Some(entry.clone()))
+                }
+                _ => (scalar, None),
+            };
+
             let variant_fqn = format!("{proto_fqn}.{oneof_name}.{proto_name}");
             let custom_attrs =
                 CodeGenContext::matching_attributes(&ctx.config.field_attributes, &variant_fqn)?;
@@ -140,7 +160,7 @@ fn collect_variant_info(
                 is_boxed: is_boxed_variant(field_type),
                 is_null_value: is_null_value_field(field),
                 custom_attrs,
-                extern_entry: None,
+                extern_entry: extern_entry_cached,
             })
         })
         .collect()

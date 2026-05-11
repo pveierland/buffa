@@ -1379,6 +1379,74 @@ fn owned_float_extern_is_non_default_check_parens_through_to_bits() {
     );
 }
 
+#[test]
+fn extern_path_applies_to_string_oneof_variant() {
+    let mut file = proto3_file("ext_oneof_str.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("subpath".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_STRING),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("kind".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.subpath",
+        "crate::wrap::Subpath",
+    )]);
+    let files = generate(&[file], &["ext_oneof_str.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        content.contains("Subpath(crate::wrap::Subpath)"),
+        "owned oneof variant body must use the brand: {content}"
+    );
+}
+
+#[test]
+fn extern_path_applies_to_uint32_oneof_variant() {
+    let mut file = proto3_file("ext_oneof_u32.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("index".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_UINT32),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("kind".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.index",
+        "crate::wrap::Idx",
+    )]);
+    let files = generate(&[file], &["ext_oneof_u32.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        content.contains("Index(crate::wrap::Idx)"),
+        "owned oneof numeric variant body must use the brand: {content}"
+    );
+}
+
 /// `view_path` strings must be the bare type name. Codegen attaches `<'a>`
 /// / `<'_>` automatically at field-declaration and conversion sites; a
 /// user-supplied `"FooRef<'a>"` would expand to `FooRef<'a><'a>` deep in
