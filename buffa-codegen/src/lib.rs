@@ -378,8 +378,14 @@ pub struct CodeGenConfig {
     ///
     /// # Map keys / values, oneof variants, bytes
     ///
-    /// Map keys/values and oneof variants are excluded from lookup.
-    /// `bytes`-typed fields matched by `bytes_fields` take precedence.
+    /// Map keys/values are excluded from the lookup. Oneof variants ARE
+    /// included — their FQN omits the oneof name segment (e.g. a variant
+    /// `string subpath = 1` inside `oneof k` in `mnos.Msg` matches
+    /// `.mnos.Msg.subpath`, NOT `.mnos.Msg.k.subpath` — this diverges from
+    /// `field_attributes`, which does include the oneof name; the
+    /// divergence is intentional and `lookup_extern_field_path` is the
+    /// authoritative form). `bytes`-typed fields matched by `bytes_fields`
+    /// take precedence over any extern path entry.
     /// `TYPE_BYTES` and `TYPE_BOOL` are not supported wire types.
     pub extern_field_paths: Vec<ExternFieldPath>,
 }
