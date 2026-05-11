@@ -1744,3 +1744,37 @@ fn extern_path_on_bytes_oneof_variant_is_build_error() {
         "validator error must mention extern_field_path + TYPE_BYTES: {msg}"
     );
 }
+
+#[test]
+fn extern_field_view_path_on_numeric_oneof_variant_is_build_error() {
+    let mut file = proto3_file("ext_oneof_view_err.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("index".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_UINT32),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("kind".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![
+        ExternFieldPath::new(".Msg.index", "crate::wrap::Idx")
+            .with_view_path("crate::wrap::IdxRef"),
+    ]);
+    let err = generate(&[file], &["ext_oneof_view_err.proto".to_string()], &config)
+        .unwrap_err();
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("extern_field_view_path") && msg.contains("TYPE_UINT32"),
+        "validator error must mention extern_field_view_path + TYPE_UINT32: {msg}"
+    );
+}
