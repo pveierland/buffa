@@ -1754,7 +1754,30 @@ fn oneof_variant_to_owned(
         Type::TYPE_MESSAGE | Type::TYPE_GROUP => Ok(
             quote! { ::buffa::alloc::boxed::Box::new(v.to_owned_from_source(__buffa_src)) },
         ),
-        _ => Ok(quote! { *v }),
+        // Enums are Copy integers; no extern_field_paths wrapping applies.
+        Type::TYPE_ENUM => Ok(quote! { *v }),
+        // Numerics (varint/fixed/float/double) and bool.
+        // For bool the wrap never fires (validator rejects extern paths on bool).
+        Type::TYPE_DOUBLE
+        | Type::TYPE_FLOAT
+        | Type::TYPE_INT64
+        | Type::TYPE_UINT64
+        | Type::TYPE_INT32
+        | Type::TYPE_FIXED64
+        | Type::TYPE_FIXED32
+        | Type::TYPE_BOOL
+        | Type::TYPE_UINT32
+        | Type::TYPE_SFIXED32
+        | Type::TYPE_SFIXED64
+        | Type::TYPE_SINT32
+        | Type::TYPE_SINT64 => {
+            let field_fqn = format!(".{proto_fqn}.{field_name}");
+            let inner_ty = scalar_ty(ty);
+            match ctx.try_wrap_extern_view_numeric_to_owned(&field_fqn, &inner_ty, quote! { *v })? {
+                Some(expr) => Ok(expr),
+                None => Ok(quote! { *v }),
+            }
+        }
     }
 }
 

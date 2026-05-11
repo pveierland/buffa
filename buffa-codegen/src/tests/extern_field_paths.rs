@@ -1581,3 +1581,43 @@ fn extern_field_view_path_applies_to_string_oneof_variant() {
         "view oneof to_owned must convert via From<&BrandRef>: {content}"
     );
 }
+
+#[test]
+fn extern_path_uint32_oneof_variant_view_to_owned_applies_brand_from() {
+    // Configure a uint32 oneof variant with a brand; the generated
+    // to_owned_message must convert the view variant via
+    // `<Idx as From<u32>>::from(*v)`. Numeric variants do not carry a
+    // view_path (view side stays raw u32), so the wrap is purely on the
+    // owned-side conversion.
+    let mut file = proto3_file("ext_oneof_u32_to_owned.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("index".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_UINT32),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("kind".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let config = CodeGenConfig {
+        generate_views: true,
+        extern_field_paths: vec![ExternFieldPath::new(".Msg.index", "crate::wrap::Idx")],
+        ..CodeGenConfig::default()
+    };
+    let files = generate(&[file], &["ext_oneof_u32_to_owned.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        content.contains("crate::wrap::Idx as ::core::convert::From<u32>"),
+        "view→owned numeric brand conversion missing: {content}"
+    );
+}
