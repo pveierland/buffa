@@ -1778,3 +1778,42 @@ fn extern_field_view_path_on_numeric_oneof_variant_is_build_error() {
         "validator error must mention extern_field_view_path + TYPE_UINT32: {msg}"
     );
 }
+
+#[test]
+fn unmatched_extern_field_path_entry_is_build_error() {
+    // Common-typo case: configuring `.Msg.oneof_name.variant` (the
+    // field_attributes convention) for a real oneof variant. The
+    // extern_field_paths convention drops the oneof segment, so the
+    // entry never matches and would silently no-op without this guard.
+    let mut file = proto3_file("ext_unmatched.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("subpath".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_STRING),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("kind".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.kind.subpath",
+        "crate::wrap::Subpath",
+    )]);
+    let err = generate(&[file], &["ext_unmatched.proto".to_string()], &config)
+        .unwrap_err();
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains(".Msg.kind.subpath") && msg.contains("oneof name segment"),
+        "validator error must echo the bad FQN and mention the oneof FQN \
+         convention: {msg}"
+    );
+}

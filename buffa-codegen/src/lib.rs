@@ -675,6 +675,15 @@ fn validate_extern_field_paths(
         }
     }
 
+    // Track which entries match at least one field. After the walk, any
+    // entry whose `fqn_prefix` never matched is reported. This catches
+    // the most common typo class — most notably writing
+    // `.Msg.oneof.variant` (the `field_attributes` convention) instead of
+    // `.Msg.variant` (the `extern_field_paths` convention). Without this
+    // check the swap silently no-ops and the user only notices by
+    // inspecting generated code.
+    let mut matched: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
     for file_name in files_to_generate {
         let Some(file) = file_descriptors
             .iter()
@@ -684,15 +693,38 @@ fn validate_extern_field_paths(
             continue;
         };
         let package = file.package.as_deref().unwrap_or("");
-        walk_messages_for_extern_validation(ctx, &file.message_type, package)?;
+        walk_messages_for_extern_validation(ctx, &file.message_type, package, &mut matched)?;
+    }
+
+    let unmatched: Vec<&ExternFieldPath> = ctx
+        .config
+        .extern_field_paths
+        .iter()
+        .filter(|entry| !matched.contains(entry.fqn_prefix.as_str()))
+        .collect();
+    if !unmatched.is_empty() {
+        let list = unmatched
+            .iter()
+            .map(|entry| format!("  {} -> {}", entry.fqn_prefix, entry.owned_path))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(CodeGenError::Other(format!(
+            "extern_field_paths configured for field paths that do not match any \
+             field in the descriptors being generated:\n{list}\n\n\
+             Common cause: oneof variant FQNs omit the oneof name segment \
+             (e.g. `.Msg.variant`, NOT `.Msg.oneof_name.variant`) — this \
+             diverges from `field_attributes`. See \
+             `CodeGenConfig::extern_field_paths` rustdoc for details."
+        )));
     }
     Ok(())
 }
 
-fn walk_messages_for_extern_validation(
-    ctx: &context::CodeGenContext,
+fn walk_messages_for_extern_validation<'a>(
+    ctx: &'a context::CodeGenContext,
     messages: &[crate::generated::descriptor::DescriptorProto],
     scope: &str,
+    matched: &mut std::collections::HashSet<&'a str>,
 ) -> Result<(), CodeGenError> {
     use crate::generated::descriptor::field_descriptor_proto::Type;
 
@@ -712,6 +744,7 @@ fn walk_messages_for_extern_validation(
             let Some(entry) = ctx.lookup_extern_field_path(&field_fqn) else {
                 continue;
             };
+            matched.insert(entry.fqn_prefix.as_str());
             let wire_type = field.r#type.unwrap_or_default();
 
             // Allowed wire types for extern_field_path: string + numeric scalars.
@@ -781,6 +814,7 @@ fn walk_messages_for_extern_validation(
                 ctx,
                 nested_msgs,
                 msg_fqn.trim_start_matches('.'),
+                matched,
             )?;
         }
     }
