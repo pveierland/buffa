@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `extern_field_paths` now applies to real oneof variant fields (string +
+  numeric scalars). Branded variants land as the brand type in both owned
+  and view (string only — numeric view stays raw); encode, decode, JSON,
+  and TextFormat all wrap through the existing `wrap_extern_*` and
+  `*_extern` shim infrastructure. The FQN convention for variants omits
+  the oneof name segment (e.g. `.Msg.subpath`, not `.Msg.k.subpath`) —
+  this diverges from `field_attributes` and is documented on
+  `CodeGenConfig::extern_field_paths`.
 - New `extern_field_paths: Vec<ExternFieldPath>` config field on
   `CodeGenConfig`, with corresponding `extern_field_path=` and
   `extern_field_view_path=` plugin parameters on `protoc-gen-buffa`.
