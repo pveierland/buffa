@@ -1741,10 +1741,26 @@ fn oneof_variant_to_owned(
         Type::TYPE_STRING => {
             let field_fqn = format!(".{proto_fqn}.{field_name}");
             // When view_path is set the variant body is BrandRef<'a>, not &'a str.
-            // v.to_string() would require Display; use wrap_extern_view_to_owned
-            // which emits the correct From<&BrandRef> / From<&str> / .to_string() path.
-            if ctx.lookup_extern_field_path(&field_fqn).is_some() {
-                ctx.wrap_extern_view_to_owned(&field_fqn, quote! { v })
+            // The match arm binds `v: &Variant` via match-ergonomics, so `v`
+            // is already the borrow shape `From<&BrandRef<'_>>` (or
+            // `From<&str>`) wants. Build the conversion inline rather than
+            // routing through `wrap_extern_view_to_owned`, which always
+            // prepends a fresh `&` and would produce `&&Variant`.
+            if let Some(entry) = ctx.lookup_extern_field_path(&field_fqn) {
+                let owned_ty: syn::Type = syn::parse_str(&entry.owned_path)
+                    .map_err(|_| CodeGenError::InvalidTypePath(entry.owned_path.clone()))?;
+                match entry.view_path.as_deref() {
+                    Some(view_path) => {
+                        let view_ty: syn::Type = syn::parse_str(view_path)
+                            .map_err(|_| CodeGenError::InvalidTypePath(view_path.to_string()))?;
+                        Ok(quote! {
+                            <#owned_ty as ::core::convert::From<&#view_ty<'_>>>::from(v)
+                        })
+                    }
+                    None => Ok(quote! {
+                        <#owned_ty as ::core::convert::From<&str>>::from(v)
+                    }),
+                }
             } else {
                 Ok(quote! { v.to_string() })
             }
