@@ -1710,3 +1710,37 @@ fn extern_path_wraps_oneof_variant_in_text_format() {
         "TextFormat merge must wrap decoded value via From<String>: {content}"
     );
 }
+
+#[test]
+fn extern_path_on_bytes_oneof_variant_is_build_error() {
+    let mut file = proto3_file("ext_oneof_bytes_err.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("data".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_BYTES),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("kind".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.data",
+        "crate::wrap::Bad",
+    )]);
+    let err = generate(&[file], &["ext_oneof_bytes_err.proto".to_string()], &config)
+        .unwrap_err();
+
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("extern_field_path") && msg.contains("TYPE_BYTES"),
+        "validator error must mention extern_field_path + TYPE_BYTES: {msg}"
+    );
+}
