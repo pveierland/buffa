@@ -25,12 +25,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   string-backed brands (with optional view-side borrowed counterpart)
   and numeric brands. Mechanism is the per-field analogue of the
   existing `extern_paths`; the `bytes_fields` precedence is preserved,
-  and map keys/values, oneof variants, and non-scalar field types are
-  skipped or rejected with a clear error. Wrappers must implement
-  `From<Inner>` and `AsRef<Inner>` (plus `Default` only for
-  implicit-presence scalars); buffa emits explicit-trait
-  disambiguation at decode and encode sites so additional `From` /
-  `AsRef` impls a downstream user adds remain non-conflicting.
+  and map keys/values plus non-scalar field types (`TYPE_BYTES`,
+  `TYPE_BOOL`, `TYPE_MESSAGE`, `TYPE_ENUM`) are skipped or rejected
+  with a clear error. (Oneof variants are supported — see the
+  dedicated entry above.) Wrappers must implement `From<Inner>` and
+  `AsRef<Inner>` (plus `Default` only for implicit-presence scalars);
+  buffa emits explicit-trait disambiguation at decode and encode sites
+  so additional `From` / `AsRef` impls a downstream user adds remain
+  non-conflicting.
 - **`extern_field_paths` — JSON, view, clear coverage.** Closes the gaps
   for end-to-end use of `extern_field_paths` on real consumer schemas:
   - Owned-side serde now routes through `proto_string_extern` /

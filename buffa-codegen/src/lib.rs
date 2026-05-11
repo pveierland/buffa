@@ -321,6 +321,8 @@ pub struct CodeGenConfig {
     /// - `::core::default::Default` — required when the field has implicit
     ///   presence (proto3 non-optional); `clear()`, the message's derived
     ///   `Default`, and the JSON skip-defaults predicates call this.
+    ///   **Oneof variants are exempt**: the enum variant *is* the presence
+    ///   signal, so `Default` is never invoked on a branded variant payload.
     ///
     /// The brand does **not** need to impl `serde::Serialize` /
     /// `serde::Deserialize`. Buffa's generated `#[serde(with = "...")]`
@@ -376,17 +378,39 @@ pub struct CodeGenConfig {
     /// route through extern shims and do not impose this requirement.
     /// A future change can add `repeated_*_extern` shims to lift this.
     ///
-    /// # Map keys / values, oneof variants, bytes
+    /// # Oneof variants
     ///
-    /// Map keys/values are excluded from the lookup. Oneof variants ARE
-    /// included — their FQN omits the oneof name segment (e.g. a variant
-    /// `string subpath = 1` inside `oneof k` in `mnos.Msg` matches
-    /// `.mnos.Msg.subpath`, NOT `.mnos.Msg.k.subpath` — this diverges from
-    /// `field_attributes`, which does include the oneof name; the
-    /// divergence is intentional and `lookup_extern_field_path` is the
-    /// authoritative form). `bytes`-typed fields matched by `bytes_fields`
-    /// take precedence over any extern path entry.
-    /// `TYPE_BYTES` and `TYPE_BOOL` are not supported wire types.
+    /// **Supported** for `TYPE_STRING` and numeric scalar variants
+    /// (`int32`/`int64`/`uint32`/`uint64`/`sint32`/`sint64`/`fixed32`/
+    /// `fixed64`/`sfixed32`/`sfixed64`/`float`/`double`). Branded variants
+    /// land as the brand type in both the owned enum and (for strings
+    /// with `view_path`) the view enum; numeric view variants stay raw
+    /// scalar and apply the brand `From<Inner>` at `to_owned_message`.
+    /// The brand contract is identical to the non-oneof case
+    /// (`From<Inner>` and `AsRef<Inner>`; `Default` is only required for
+    /// non-oneof implicit-presence scalars — oneof variants never call
+    /// `Default` on the brand).
+    ///
+    /// **FQN convention (important):** for an oneof variant the FQN
+    /// omits the oneof name segment. A variant `string subpath = 1`
+    /// inside `oneof k` in message `pkg.Msg` matches `.pkg.Msg.subpath`,
+    /// **not** `.pkg.Msg.k.subpath`. This diverges from
+    /// `field_attributes` and `bytes_fields`, which both include the
+    /// oneof name. The divergence is intentional —
+    /// `lookup_extern_field_path` is the authoritative form. A
+    /// mis-named entry currently silently no-ops (the entry never
+    /// matches, the variant emits as the raw scalar).
+    ///
+    /// `view_path` is rejected for numeric oneof variants; `TYPE_BYTES`
+    /// oneof variants are rejected outright (use `bytes_fields` for
+    /// non-oneof bytes; bytes brands inside oneofs are not supported).
+    ///
+    /// # Map keys / values and other unsupported shapes
+    ///
+    /// Map keys/values are excluded from the lookup. `bytes`-typed
+    /// fields matched by `bytes_fields` take precedence over any extern
+    /// path entry. `TYPE_BYTES`, `TYPE_BOOL`, `TYPE_MESSAGE`,
+    /// `TYPE_GROUP`, and `TYPE_ENUM` are not supported wire types.
     pub extern_field_paths: Vec<ExternFieldPath>,
 }
 

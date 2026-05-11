@@ -500,8 +500,15 @@ impl<'a> CodeGenContext<'a> {
 
     /// Look up the extern field path entry, if any, that matches `field_fqn`.
     /// Returns the first matching entry — caller-provided ordering applies.
-    /// `field_fqn` follows the same `".pkg.Msg.field"` convention as
-    /// `field_attributes` and `bytes_fields`.
+    ///
+    /// `field_fqn` is `".pkg.Msg.field"` for top-level fields and
+    /// `".pkg.Msg.NestedMsg.field"` for fields on nested messages. **For
+    /// fields declared inside a `oneof` the FQN omits the oneof name
+    /// segment** — e.g. a variant `string subpath = 1` inside `oneof k`
+    /// in `pkg.Msg` matches `".pkg.Msg.subpath"`, NOT
+    /// `".pkg.Msg.k.subpath"`. This diverges from `field_attributes` and
+    /// `bytes_fields`, both of which include the oneof name. See
+    /// [`crate::CodeGenConfig::extern_field_paths`] for the rationale.
     pub fn lookup_extern_field_path(&self, field_fqn: &str) -> Option<&ExternFieldPath> {
         self.config
             .extern_field_paths

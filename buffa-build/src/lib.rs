@@ -246,11 +246,33 @@ impl Config {
     /// the natural scalar type on the owned struct, e.g.
     /// `"::my_crate::wrap::NixStorePath"`.
     ///
-    /// # Example
+    /// # Oneof variants
+    ///
+    /// Oneof variants are supported (string + numeric scalars). **The FQN
+    /// omits the oneof name segment** — see the example below. A
+    /// mis-named entry currently silently no-ops; double-check the FQN
+    /// in generated output if a swap doesn't appear.
+    ///
+    /// # Examples
+    ///
+    /// Singular field:
     ///
     /// ```rust,ignore
     /// buffa_build::Config::new()
     ///     .extern_field_path(".my.pkg.MyMessage.path", "::my_crate::wrap::Path")
+    ///     .files(&["proto/my_service.proto"])
+    ///     .includes(&["proto/"])
+    ///     .compile()
+    ///     .unwrap();
+    /// ```
+    ///
+    /// Oneof variant (for `message Msg { oneof kind { string subpath = 1; } }`
+    /// in package `my.pkg`):
+    ///
+    /// ```rust,ignore
+    /// buffa_build::Config::new()
+    ///     // Note: ".my.pkg.Msg.subpath" — NOT ".my.pkg.Msg.kind.subpath".
+    ///     .extern_field_path(".my.pkg.Msg.subpath", "::my_crate::wrap::Subpath")
     ///     .files(&["proto/my_service.proto"])
     ///     .includes(&["proto/"])
     ///     .compile()
