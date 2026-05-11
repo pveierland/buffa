@@ -67,7 +67,6 @@ struct VariantInfo {
     /// match and an eligible wire type; `None` otherwise. Cached here so
     /// JSON-side codegen routes through `*_extern` serde shims without
     /// re-doing the FQN lookup.
-    #[allow(dead_code)]
     extern_entry: Option<crate::ExternFieldPath>,
 }
 
@@ -312,20 +311,50 @@ pub fn generate_oneof_enum(
 
 // ── Serde impl generation ────────────────────────────────────────────────────
 
-/// Return the path to the serde helper `serialize` function for a field type,
+/// Return the path to the serde helper module for a field type,
 /// or `None` if the type uses default serde serialization.
-pub(crate) fn serde_helper_path(field_type: Type) -> Option<TokenStream> {
+///
+/// When `is_extern` is `true`, numeric types route through the `*_extern`
+/// variant whose `serialize`/`deserialize` functions are generic over
+/// `T: AsRef<Inner>` / `T: From<Inner>` so they compile against a brand
+/// wrapper rather than the raw primitive.  String and bytes types are
+/// unaffected: strings are handled via `#[serde(transparent)]`/`with =`
+/// attributes on the struct field rather than here, and `TYPE_BYTES` extern
+/// entries are rejected at validation time.
+pub(crate) fn serde_helper_path(field_type: Type, is_extern: bool) -> Option<TokenStream> {
     match field_type {
-        Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => {
-            Some(quote! { ::buffa::json_helpers::int32 })
-        }
-        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => Some(quote! { ::buffa::json_helpers::uint32 }),
-        Type::TYPE_INT64 | Type::TYPE_SINT64 | Type::TYPE_SFIXED64 => {
-            Some(quote! { ::buffa::json_helpers::int64 })
-        }
-        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => Some(quote! { ::buffa::json_helpers::uint64 }),
-        Type::TYPE_FLOAT => Some(quote! { ::buffa::json_helpers::float }),
-        Type::TYPE_DOUBLE => Some(quote! { ::buffa::json_helpers::double }),
+        Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => Some(if is_extern {
+            quote! { ::buffa::json_helpers::int32_extern }
+        } else {
+            quote! { ::buffa::json_helpers::int32 }
+        }),
+        Type::TYPE_UINT32 | Type::TYPE_FIXED32 => Some(if is_extern {
+            quote! { ::buffa::json_helpers::uint32_extern }
+        } else {
+            quote! { ::buffa::json_helpers::uint32 }
+        }),
+        Type::TYPE_INT64 | Type::TYPE_SINT64 | Type::TYPE_SFIXED64 => Some(if is_extern {
+            quote! { ::buffa::json_helpers::int64_extern }
+        } else {
+            quote! { ::buffa::json_helpers::int64 }
+        }),
+        Type::TYPE_UINT64 | Type::TYPE_FIXED64 => Some(if is_extern {
+            quote! { ::buffa::json_helpers::uint64_extern }
+        } else {
+            quote! { ::buffa::json_helpers::uint64 }
+        }),
+        Type::TYPE_FLOAT => Some(if is_extern {
+            quote! { ::buffa::json_helpers::float_extern }
+        } else {
+            quote! { ::buffa::json_helpers::float }
+        }),
+        Type::TYPE_DOUBLE => Some(if is_extern {
+            quote! { ::buffa::json_helpers::double_extern }
+        } else {
+            quote! { ::buffa::json_helpers::double }
+        }),
+        // bytes has only one shim; extern entries on TYPE_BYTES are rejected
+        // at validation time anyway.
         Type::TYPE_BYTES => Some(quote! { ::buffa::json_helpers::bytes }),
         _ => None,
     }
@@ -352,7 +381,7 @@ fn generate_oneof_serialize(
             }
 
             let rust_type = &v.rust_type;
-            if let Some(helper) = serde_helper_path(v.field_type) {
+            if let Some(helper) = serde_helper_path(v.field_type, v.extern_entry.is_some()) {
                 // Type needs special proto JSON encoding — wrap in a newtype
                 // that delegates to the helper's serialize function.
                 quote! {
@@ -407,6 +436,10 @@ pub(crate) struct OneofVariantDeserInput<'a> {
     pub result_var: &'a Ident,
     /// The proto name of the oneof, for error messages.
     pub oneof_name: &'a str,
+    /// `true` if the variant has an `extern_field_paths` match. Routes the
+    /// JSON deserialize through the `*_extern` shim so the generic
+    /// `T: From<Inner>` infers as the brand type.
+    pub is_extern: bool,
 }
 
 /// Generate the deserialization match-arm body for one oneof variant.
@@ -431,6 +464,7 @@ pub(crate) fn oneof_variant_deser_arm(input: &OneofVariantDeserInput<'_>) -> Tok
         enum_ident,
         result_var,
         oneof_name,
+        is_extern,
     } = input;
     let dup_err_msg = format!("multiple oneof fields set for '{oneof_name}'");
     // For boxed variants, the deserialized inner value must be wrapped.
@@ -456,7 +490,7 @@ pub(crate) fn oneof_variant_deser_arm(input: &OneofVariantDeserInput<'_>) -> Tok
         };
         (deser, set)
     } else {
-        let deser = if let Some(helper) = serde_helper_path(*field_type) {
+        let deser = if let Some(helper) = serde_helper_path(*field_type, *is_extern) {
             // For bytes: json_helpers::bytes::deserialize is generic over
             // T: From<Vec<u8>>; the `-> Result<#variant_type, _>` return
             // type pins T to either Vec<u8> (default) or bytes::Bytes

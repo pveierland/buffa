@@ -996,6 +996,9 @@ fn custom_deser_oneof_group(
             scalar_or_message_type_nested(ctx, field, current_package, nesting, features, resolver)?
         };
 
+        let variant_field_fqn = format!(".{proto_fqn}.{proto_name}");
+        let is_extern = ctx.lookup_extern_field_path(&variant_field_fqn).is_some();
+
         let qualified_enum: TokenStream = quote! { #oneof_prefix #enum_ident };
         let arm = crate::oneof::oneof_variant_deser_arm(&crate::oneof::OneofVariantDeserInput {
             variant_ident: &variant_ident,
@@ -1008,6 +1011,7 @@ fn custom_deser_oneof_group(
             enum_ident: &qualified_enum,
             result_var: &var_ident,
             oneof_name,
+            is_extern,
         });
         arms.push(arm);
     }

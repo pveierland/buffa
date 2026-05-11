@@ -1621,3 +1621,42 @@ fn extern_path_uint32_oneof_variant_view_to_owned_applies_brand_from() {
         "view→owned numeric brand conversion missing: {content}"
     );
 }
+
+#[test]
+fn extern_path_routes_uint32_oneof_variant_through_extern_shim() {
+    let mut file = proto3_file("ext_oneof_u32_json.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("index".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_UINT32),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("kind".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let mut config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.index",
+        "crate::wrap::Idx",
+    )]);
+    config.generate_json = true;
+    let files = generate(&[file], &["ext_oneof_u32_json.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    assert!(
+        content.contains("::buffa::json_helpers::uint32_extern"),
+        "branded uint32 oneof variant must route JSON through uint32_extern shim: {content}"
+    );
+    assert!(
+        !content.contains("::buffa::json_helpers::uint32::serialize"),
+        "must not fall back to the non-extern shim (would be a type error): {content}"
+    );
+}
