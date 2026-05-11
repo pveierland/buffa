@@ -357,7 +357,7 @@ fn is_copy_scalar(ty: Type) -> bool {
 /// dependency — text-format emit doesn't carry a resolver and only ever needs
 /// these scalar shapes (extern paths are validated to TYPE_STRING + numerics
 /// at `generate` entry).
-fn extern_inner_ty(ty: Type) -> TokenStream {
+pub(crate) fn extern_inner_ty(ty: Type) -> TokenStream {
     match ty {
         Type::TYPE_INT32 | Type::TYPE_SINT32 | Type::TYPE_SFIXED32 => quote! { i32 },
         Type::TYPE_INT64 | Type::TYPE_SINT64 | Type::TYPE_SFIXED64 => quote! { i64 },
@@ -377,7 +377,7 @@ fn extern_inner_ty(ty: Type) -> TokenStream {
 /// groups. Enumerated explicitly rather than computed from `is_copy_scalar`
 /// so that `extern_inner_ty(ty)` is never reachable for a non-numeric `ty`
 /// even if a future call site forgets to pre-filter enums.
-fn is_extern_eligible_numeric(ty: Type) -> bool {
+pub(crate) fn is_extern_eligible_numeric(ty: Type) -> bool {
     matches!(
         ty,
         Type::TYPE_INT32
