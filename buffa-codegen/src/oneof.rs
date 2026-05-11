@@ -63,6 +63,11 @@ struct VariantInfo {
     /// Custom attributes matched via `CodeGenConfig::field_attributes` on the
     /// variant's fully-qualified path (`{oneof_fqn}.{variant_proto_name}`).
     custom_attrs: TokenStream,
+    /// `Some(entry.clone())` if this variant has an `extern_field_paths`
+    /// match and an eligible wire type; `None` otherwise. Cached here so
+    /// JSON-side codegen routes through `*_extern` serde shims without
+    /// re-doing the FQN lookup.
+    extern_entry: Option<crate::ExternFieldPath>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -135,6 +140,7 @@ fn collect_variant_info(
                 is_boxed: is_boxed_variant(field_type),
                 is_null_value: is_null_value_field(field),
                 custom_attrs,
+                extern_entry: None,
             })
         })
         .collect()
