@@ -67,6 +67,7 @@ struct VariantInfo {
     /// match and an eligible wire type; `None` otherwise. Cached here so
     /// JSON-side codegen routes through `*_extern` serde shims without
     /// re-doing the FQN lookup.
+    #[allow(dead_code)]
     extern_entry: Option<crate::ExternFieldPath>,
 }
 

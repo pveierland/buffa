@@ -1414,6 +1414,51 @@ fn extern_path_applies_to_string_oneof_variant() {
 }
 
 #[test]
+fn string_oneof_variant_brand_binary_round_trip() {
+    // Structural check: the generated binary encode/decode for a branded
+    // string oneof variant must wrap operands via the wrap_extern_* helpers.
+    // The wire format itself is identical to the unbranded version — the
+    // brand wrap is purely compile-time. Bytes-equivalence is covered by
+    // integration tests in buffa-test/.
+    let mut file = proto3_file("ext_oneof_str_bin.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("subpath".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_STRING),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("kind".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.subpath",
+        "crate::wrap::Subpath",
+    )]);
+    let files = generate(&[file], &["ext_oneof_str_bin.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    // Encode side: must call AsRef<String> to project the brand to &String.
+    assert!(
+        content.contains("crate::wrap::Subpath as ::core::convert::AsRef"),
+        "binary encode must wrap branded oneof variant via AsRef: {content}"
+    );
+    // Decode side: must call From<String> to construct the brand.
+    assert!(
+        content.contains("crate::wrap::Subpath as ::core::convert::From"),
+        "binary decode must wrap decoded value via From: {content}"
+    );
+}
+
+#[test]
 fn extern_path_applies_to_uint32_oneof_variant() {
     let mut file = proto3_file("ext_oneof_u32.proto");
     file.message_type.push(DescriptorProto {

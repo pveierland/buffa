@@ -777,14 +777,21 @@ pub(crate) fn build_view_encode_methods(
                     );
                     let tag_len = tag_encoded_len(field_number, wire_type_byte(ty));
                     let wire_type = wire_type_token(ty);
-                    size_arms.push(oneof_size_arm(&qualified, &variant, tag_len, ty));
+                    // View-side oneof arms: pass an empty FQN so that no
+                    // extern_field_paths lookup matches. View-side extern
+                    // wrapping for oneofs is not yet implemented; the view
+                    // variant payloads are raw borrowed types (&str, etc.)
+                    // that don't need the owned AsRef<String> projection.
+                    size_arms.push(oneof_size_arm(ctx, "", &qualified, &variant, tag_len, ty)?);
                     write_arms.push(oneof_write_arm(
+                        ctx,
+                        "",
                         &qualified,
                         &variant,
                         field_number,
                         ty,
                         &wire_type,
-                    ));
+                    )?);
                 }
                 compute_stmts.push(quote! {
                     if let ::core::option::Option::Some(ref v) = self.#field_ident {
@@ -2481,28 +2488,37 @@ fn repeated_merge_arm(
 ///
 /// Emits `EnumIdent::VariantIdent(x) => { size += tag_len + encoded_len; }`.
 fn oneof_size_arm(
+    ctx: &CodeGenContext,
+    variant_field_fqn: &str,
     enum_ident: &TokenStream,
     variant_ident: &Ident,
     tag_len: u32,
     ty: Type,
-) -> TokenStream {
+) -> Result<TokenStream, CodeGenError> {
     match ty {
-        Type::TYPE_STRING => quote! {
-            #enum_ident::#variant_ident(x) => {
-                size += #tag_len + ::buffa::types::string_encoded_len(x) as u32;
-            }
-        },
-        Type::TYPE_BYTES => quote! {
+        Type::TYPE_STRING => {
+            let arg = ctx.wrap_extern_encode_ref(
+                variant_field_fqn,
+                &quote! { ::buffa::alloc::string::String },
+                quote! { x },
+            )?;
+            Ok(quote! {
+                #enum_ident::#variant_ident(x) => {
+                    size += #tag_len + ::buffa::types::string_encoded_len(#arg) as u32;
+                }
+            })
+        }
+        Type::TYPE_BYTES => Ok(quote! {
             #enum_ident::#variant_ident(x) => {
                 size += #tag_len + ::buffa::types::bytes_encoded_len(x) as u32;
             }
-        },
-        Type::TYPE_ENUM => quote! {
+        }),
+        Type::TYPE_ENUM => Ok(quote! {
             #enum_ident::#variant_ident(x) => {
                 size += #tag_len + ::buffa::types::int32_encoded_len(x.to_i32()) as u32;
             }
-        },
-        Type::TYPE_MESSAGE => quote! {
+        }),
+        Type::TYPE_MESSAGE => Ok(quote! {
             #enum_ident::#variant_ident(x) => {
                 let __slot = __cache.reserve();
                 let inner = x.compute_size(__cache);
@@ -2511,38 +2527,54 @@ fn oneof_size_arm(
                     + ::buffa::encoding::varint_len(inner as u64) as u32
                     + inner;
             }
-        },
-        Type::TYPE_GROUP => quote! {
+        }),
+        Type::TYPE_GROUP => Ok(quote! {
             #enum_ident::#variant_ident(x) => {
                 let inner = x.compute_size(__cache);
                 size += #tag_len + inner + #tag_len;
             }
-        },
-        Type::TYPE_FIXED32 | Type::TYPE_SFIXED32 | Type::TYPE_FLOAT => quote! {
+        }),
+        Type::TYPE_FIXED32 | Type::TYPE_SFIXED32 | Type::TYPE_FLOAT => Ok(quote! {
             #enum_ident::#variant_ident(_x) => {
                 size += #tag_len + ::buffa::types::FIXED32_ENCODED_LEN as u32;
             }
-        },
-        Type::TYPE_FIXED64 | Type::TYPE_SFIXED64 | Type::TYPE_DOUBLE => quote! {
+        }),
+        Type::TYPE_FIXED64 | Type::TYPE_SFIXED64 | Type::TYPE_DOUBLE => Ok(quote! {
             #enum_ident::#variant_ident(_x) => {
                 size += #tag_len + ::buffa::types::FIXED64_ENCODED_LEN as u32;
             }
-        },
-        Type::TYPE_BOOL => quote! {
+        }),
+        Type::TYPE_BOOL => Ok(quote! {
             #enum_ident::#variant_ident(_x) => {
                 size += #tag_len + ::buffa::types::BOOL_ENCODED_LEN as u32;
             }
-        },
+        }),
         _ => {
             // Varint scalars (int32/64, uint32/64, sint32/64).
             // The oneof is matched via `if let Some(ref v) = self.field`
             // so the variant binding v: &T must be dereferenced.
-            let deref_v = quote! { *v };
-            let size_expr = type_encoded_size_expr(ty, &deref_v);
-            quote! {
-                #enum_ident::#variant_ident(v) => {
-                    size += #tag_len + #size_expr;
-                }
+            if crate::impl_text::is_extern_eligible_numeric(ty) {
+                let inner = crate::impl_text::extern_inner_ty(ty);
+                let arg = ctx.wrap_extern_encode_value(
+                    variant_field_fqn,
+                    &inner,
+                    quote! { *v },
+                    quote! { v },
+                )?;
+                let size_expr = type_encoded_size_expr(ty, &arg);
+                Ok(quote! {
+                    #enum_ident::#variant_ident(v) => {
+                        size += #tag_len + #size_expr;
+                    }
+                })
+            } else {
+                let deref_v = quote! { *v };
+                let size_expr = type_encoded_size_expr(ty, &deref_v);
+                Ok(quote! {
+                    #enum_ident::#variant_ident(v) => {
+                        size += #tag_len + #size_expr;
+                    }
+                })
             }
         }
     }
@@ -2552,38 +2584,47 @@ fn oneof_size_arm(
 ///
 /// Emits `EnumIdent::VariantIdent(x) => { Tag::new(...).encode(buf); encode_*(x, buf); }`.
 fn oneof_write_arm(
+    ctx: &CodeGenContext,
+    variant_field_fqn: &str,
     enum_ident: &TokenStream,
     variant_ident: &Ident,
     field_number: u32,
     ty: Type,
     wire_type: &TokenStream,
-) -> TokenStream {
+) -> Result<TokenStream, CodeGenError> {
     match ty {
-        Type::TYPE_STRING => quote! {
-            #enum_ident::#variant_ident(x) => {
-                ::buffa::encoding::Tag::new(
-                    #field_number, ::buffa::encoding::WireType::LengthDelimited,
-                ).encode(buf);
-                ::buffa::types::encode_string(x, buf);
-            }
-        },
-        Type::TYPE_BYTES => quote! {
+        Type::TYPE_STRING => {
+            let arg = ctx.wrap_extern_encode_ref(
+                variant_field_fqn,
+                &quote! { ::buffa::alloc::string::String },
+                quote! { x },
+            )?;
+            Ok(quote! {
+                #enum_ident::#variant_ident(x) => {
+                    ::buffa::encoding::Tag::new(
+                        #field_number, ::buffa::encoding::WireType::LengthDelimited,
+                    ).encode(buf);
+                    ::buffa::types::encode_string(#arg, buf);
+                }
+            })
+        }
+        Type::TYPE_BYTES => Ok(quote! {
             #enum_ident::#variant_ident(x) => {
                 ::buffa::encoding::Tag::new(
                     #field_number, ::buffa::encoding::WireType::LengthDelimited,
                 ).encode(buf);
                 ::buffa::types::encode_bytes(x, buf);
             }
-        },
-        Type::TYPE_ENUM => quote! {
+        }),
+        Type::TYPE_ENUM => Ok(quote! {
             #enum_ident::#variant_ident(x) => {
                 ::buffa::encoding::Tag::new(
                     #field_number, ::buffa::encoding::WireType::Varint,
                 ).encode(buf);
                 ::buffa::types::encode_int32(x.to_i32(), buf);
             }
-        },
-        Type::TYPE_MESSAGE => quote! {
+        }),
+        Type::TYPE_MESSAGE => Ok(quote! {
             #enum_ident::#variant_ident(x) => {
                 ::buffa::encoding::Tag::new(
                     #field_number, ::buffa::encoding::WireType::LengthDelimited,
@@ -2591,8 +2632,8 @@ fn oneof_write_arm(
                 ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
                 x.write_to(__cache, buf);
             }
-        },
-        Type::TYPE_GROUP => quote! {
+        }),
+        Type::TYPE_GROUP => Ok(quote! {
             #enum_ident::#variant_ident(x) => {
                 ::buffa::encoding::Tag::new(
                     #field_number, ::buffa::encoding::WireType::StartGroup,
@@ -2602,15 +2643,26 @@ fn oneof_write_arm(
                     #field_number, ::buffa::encoding::WireType::EndGroup,
                 ).encode(buf);
             }
-        },
+        }),
         _ => {
             let encode_fn = encode_fn_token(ty);
-            quote! {
+            let arg = if crate::impl_text::is_extern_eligible_numeric(ty) {
+                let inner = crate::impl_text::extern_inner_ty(ty);
+                ctx.wrap_extern_encode_value(
+                    variant_field_fqn,
+                    &inner,
+                    quote! { *x },
+                    quote! { x },
+                )?
+            } else {
+                quote! { *x }
+            };
+            Ok(quote! {
                 #enum_ident::#variant_ident(x) => {
                     ::buffa::encoding::Tag::new(#field_number, #wire_type).encode(buf);
-                    #encode_fn(*x, buf);
+                    #encode_fn(#arg, buf);
                 }
-            }
+            })
         }
     }
 }
@@ -2623,6 +2675,8 @@ fn oneof_write_arm(
 /// left unset (matching Java's reference behavior and the singular-field spec).
 #[allow(clippy::too_many_arguments)]
 fn oneof_merge_arm(
+    ctx: &CodeGenContext,
+    variant_field_fqn: &str,
     field_ident: &Ident,
     enum_ident: &TokenStream,
     variant_ident: &Ident,
@@ -2631,19 +2685,26 @@ fn oneof_merge_arm(
     features: &ResolvedFeatures,
     preserve_unknown_fields: bool,
     use_bytes: bool,
-) -> TokenStream {
+) -> Result<TokenStream, CodeGenError> {
     let wire_type = wire_type_token(ty);
     let wire_byte = wire_type_byte(ty);
     let wire_check = wire_type_check(field_number, &wire_type, wire_byte);
     match ty {
-        Type::TYPE_STRING => quote! {
-            #field_number => {
-                #wire_check
-                self.#field_ident = ::core::option::Option::Some(
-                    #enum_ident::#variant_ident(::buffa::types::decode_string(buf)?)
-                );
-            }
-        },
+        Type::TYPE_STRING => {
+            let decoded = ctx.wrap_extern_decode(
+                variant_field_fqn,
+                &quote! { ::buffa::alloc::string::String },
+                quote! { ::buffa::types::decode_string(buf)? },
+            )?;
+            Ok(quote! {
+                #field_number => {
+                    #wire_check
+                    self.#field_ident = ::core::option::Option::Some(
+                        #enum_ident::#variant_ident(#decoded)
+                    );
+                }
+            })
+        }
         Type::TYPE_BYTES => {
             // decode_bytes returns Vec<u8>. Bytes: From<Vec<u8>> (zero-copy,
             // takes ownership of the Vec's buffer).
@@ -2652,14 +2713,14 @@ fn oneof_merge_arm(
             } else {
                 quote! { ::buffa::types::decode_bytes(buf)? }
             };
-            quote! {
+            Ok(quote! {
                 #field_number => {
                     #wire_check
                     self.#field_ident = ::core::option::Option::Some(
                         #enum_ident::#variant_ident(#decoded)
                     );
                 }
-            }
+            })
         }
         Type::TYPE_ENUM => {
             let closed = is_closed_enum(features);
@@ -2675,14 +2736,14 @@ fn oneof_merge_arm(
                     },
                     unknown_route,
                 );
-                quote! {
+                Ok(quote! {
                     #field_number => {
                         #wire_check
                         #decode
                     }
-                }
+                })
             } else {
-                quote! {
+                Ok(quote! {
                     #field_number => {
                         #wire_check
                         self.#field_ident = ::core::option::Option::Some(
@@ -2691,10 +2752,10 @@ fn oneof_merge_arm(
                             )
                         );
                     }
-                }
+                })
             }
         }
-        Type::TYPE_MESSAGE => quote! {
+        Type::TYPE_MESSAGE => Ok(quote! {
             #field_number => {
                 #wire_check
                 // Proto3 merge semantics: if this oneof variant is already
@@ -2711,8 +2772,8 @@ fn oneof_merge_arm(
                     );
                 }
             }
-        },
-        Type::TYPE_GROUP => quote! {
+        }),
+        Type::TYPE_GROUP => Ok(quote! {
             #field_number => {
                 #wire_check
                 if let ::core::option::Option::Some(
@@ -2727,17 +2788,27 @@ fn oneof_merge_arm(
                     );
                 }
             }
-        },
+        }),
         _ => {
             let decode_fn = decode_fn_token(ty);
-            quote! {
+            let decoded = if crate::impl_text::is_extern_eligible_numeric(ty) {
+                let inner = crate::impl_text::extern_inner_ty(ty);
+                ctx.wrap_extern_decode(
+                    variant_field_fqn,
+                    &inner,
+                    quote! { #decode_fn(buf)? },
+                )?
+            } else {
+                quote! { #decode_fn(buf)? }
+            };
+            Ok(quote! {
                 #field_number => {
                     #wire_check
                     self.#field_ident = ::core::option::Option::Some(
-                        #enum_ident::#variant_ident(#decode_fn(buf)?)
+                        #enum_ident::#variant_ident(#decoded)
                     );
                 }
-            }
+            })
         }
     }
 }
@@ -2775,17 +2846,30 @@ fn generate_oneof_impls(
         let tag_len = tag_encoded_len(field_number, wire_type_byte(ty));
         let wire_type = wire_type_token(ty);
 
-        size_arms.push(oneof_size_arm(&qualified_enum, &variant_ident, tag_len, ty));
+        let variant_field_fqn = format!(".{proto_fqn}.{field_name}");
+
+        size_arms.push(oneof_size_arm(
+            ctx,
+            &variant_field_fqn,
+            &qualified_enum,
+            &variant_ident,
+            tag_len,
+            ty,
+        )?);
         write_arms.push(oneof_write_arm(
+            ctx,
+            &variant_field_fqn,
             &qualified_enum,
             &variant_ident,
             field_number,
             ty,
             &wire_type,
-        ));
+        )?);
         let field_features = crate::features::resolve_field(ctx, field, features);
         let use_bytes = ty == Type::TYPE_BYTES && field_uses_bytes(ctx, proto_fqn, field_name);
         merge_arm_list.push(oneof_merge_arm(
+            ctx,
+            &variant_field_fqn,
             &field_ident,
             &qualified_enum,
             &variant_ident,
@@ -2794,7 +2878,7 @@ fn generate_oneof_impls(
             &field_features,
             preserve_unknown_fields,
             use_bytes,
-        ));
+        )?);
     }
 
     let compute_stmt = quote! {
