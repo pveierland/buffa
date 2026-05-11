@@ -163,7 +163,7 @@ pub(crate) fn generate_text_impl(
     let oneof_encode: Vec<_> = oneof_groups
         .iter()
         .map(|(name, enum_ident, fields)| {
-            oneof_encode_stmt(ctx, enum_ident, name, fields, oneof_prefix, features)
+            oneof_encode_stmt(ctx, enum_ident, name, fields, oneof_prefix, proto_fqn, features)
         })
         .collect::<Result<_, _>>()?;
     let map_encode: Vec<_> = map_fields
@@ -860,6 +860,7 @@ fn oneof_encode_stmt(
     oneof_name: &str,
     fields: &[&FieldDescriptorProto],
     oneof_prefix: &TokenStream,
+    proto_fqn: &str,
     parent_features: &ResolvedFeatures,
 ) -> Result<TokenStream, CodeGenError> {
     let field_ident = make_field_ident(oneof_name);
@@ -876,6 +877,7 @@ fn oneof_encode_stmt(
         let ty = effective_type(ctx, field, &features);
         let (name_lit, _) = text_field_name(proto_name, field, ty);
         let boxed = is_boxed_variant(ty);
+        let variant_field_fqn = format!(".{proto_fqn}.{proto_name}");
 
         // Box<M> auto-derefs through `&**__v` → `&M`. For string/bytes,
         // `__v: &String` / `&Vec<u8>` / `&bytes::Bytes` deref-coerces.
@@ -891,6 +893,25 @@ fn oneof_encode_stmt(
                     quote! { __v }
                 };
                 write_call(ty, &val)
+            }
+            Type::TYPE_STRING => {
+                let inner = extern_inner_ty(ty);
+                let operand = ctx.wrap_extern_encode_ref(
+                    &variant_field_fqn,
+                    &inner,
+                    quote! { __v },
+                )?;
+                write_call(ty, &operand)
+            }
+            _ if is_extern_eligible_numeric(ty) => {
+                let inner = extern_inner_ty(ty);
+                let operand = ctx.wrap_extern_encode_value(
+                    &variant_field_fqn,
+                    &inner,
+                    quote! { *__v },
+                    quote! { __v },
+                )?;
+                write_call(ty, &operand)
             }
             _ if is_copy_scalar(ty) => write_call(ty, &quote! { *__v }),
             _ => write_call(ty, &quote! { __v }),
@@ -941,6 +962,7 @@ fn oneof_merge_arms(
 
         // Message/group variants are boxed. Merge-into-existing matches
         // binary oneof semantics (oneof_merge_arm in impl_message.rs).
+        let variant_field_fqn = format!(".{proto_fqn}.{proto_name}");
         let assign = match ty {
             Type::TYPE_MESSAGE | Type::TYPE_GROUP => {
                 quote! {
@@ -967,11 +989,19 @@ fn oneof_merge_arms(
                     );
                 }
             }
-            Type::TYPE_STRING => quote! {
-                self.#field_ident = ::core::option::Option::Some(
-                    #qualified::#variant(dec.read_string()?.into_owned())
-                );
-            },
+            Type::TYPE_STRING => {
+                let inner = extern_inner_ty(ty);
+                let decoded = ctx.wrap_extern_decode(
+                    &variant_field_fqn,
+                    &inner,
+                    quote! { dec.read_string()?.into_owned() },
+                )?;
+                quote! {
+                    self.#field_ident = ::core::option::Option::Some(
+                        #qualified::#variant(#decoded)
+                    );
+                }
+            }
             Type::TYPE_BYTES => {
                 let read = if use_bytes {
                     quote! { ::buffa::bytes::Bytes::from(dec.read_bytes()?) }
@@ -985,10 +1015,16 @@ fn oneof_merge_arms(
                 }
             }
             _ => {
-                let read = read_call(ty);
+                let raw = read_call(ty);
+                let decoded = if is_extern_eligible_numeric(ty) {
+                    let inner = extern_inner_ty(ty);
+                    ctx.wrap_extern_decode(&variant_field_fqn, &inner, raw)?
+                } else {
+                    raw
+                };
                 quote! {
                     self.#field_ident = ::core::option::Option::Some(
-                        #qualified::#variant(#read)
+                        #qualified::#variant(#decoded)
                     );
                 }
             }

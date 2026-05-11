@@ -1660,3 +1660,53 @@ fn extern_path_routes_uint32_oneof_variant_through_extern_shim() {
         "must not fall back to the non-extern shim (would be a type error): {content}"
     );
 }
+
+#[test]
+fn extern_path_wraps_oneof_variant_in_text_format() {
+    let mut file = proto3_file("ext_oneof_text.proto");
+    file.message_type.push(DescriptorProto {
+        name: Some("Msg".to_string()),
+        field: vec![FieldDescriptorProto {
+            name: Some("subpath".to_string()),
+            number: Some(1),
+            label: Some(Label::LABEL_OPTIONAL),
+            r#type: Some(Type::TYPE_STRING),
+            oneof_index: Some(0),
+            ..Default::default()
+        }],
+        oneof_decl: vec![OneofDescriptorProto {
+            name: Some("kind".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+
+    let mut config = extern_path_config(vec![ExternFieldPath::new(
+        ".Msg.subpath",
+        "crate::wrap::Subpath",
+    )]);
+    config.generate_text = true;
+    let files = generate(&[file], &["ext_oneof_text.proto".to_string()], &config)
+        .expect("should generate");
+    let content = joined(&files);
+
+    // TextFormat encode: enc.write_string must receive the AsRef<String>-projected value,
+    // not the raw __v brand. Check that write_string is called with the AsRef wrap.
+    assert!(
+        contains_normalized(
+            &content,
+            "enc.write_string(<crate::wrap::Subpath as ::core::convert::AsRef<\
+             ::buffa::alloc::string::String>>::as_ref(__v))"
+        ),
+        "TextFormat encode must wrap branded oneof variant via AsRef<String>: {content}"
+    );
+    // TextFormat merge: dec.read_string() result must be wrapped via From<String>.
+    assert!(
+        contains_normalized(
+            &content,
+            "<crate::wrap::Subpath as ::core::convert::From<\
+             ::buffa::alloc::string::String>>::from(dec.read_string()?.into_owned())"
+        ),
+        "TextFormat merge must wrap decoded value via From<String>: {content}"
+    );
+}
